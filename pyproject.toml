@@ -1,0 +1,49 @@
+[project]
+name = "agenticrag"
+version = "0.1.0"
+description = "A financial document RAG project with verifiable sources and repeatable evaluation."
+readme = "README.md"
+authors = [
+    { name = "Demian", email = "1686627320@qq.com" }
+]
+requires-python = ">=3.13"
+dependencies = [
+    "fastapi>=0.141.1",
+    "langchain>=1.0,<2.0",
+    "langchain-core>=1.0,<2.0",
+    "langchain-text-splitters>=1.0,<2.0",
+    "langsmith>=0.3.0",
+    "python-dotenv>=1.0,<2.0",
+    "pymupdf>=1.28.2",
+    "uvicorn[standard]>=0.52.4",
+]
+
+[project.scripts]
+agenticrag = "agenticrag:main"
+agenticrag-parse-pdf = "agenticrag.ingestion.parse_pdf:main"
+agenticrag-build-corpus = "agenticrag.ingestion.batch_parse:main"
+agenticrag-chunk-corpus = "agenticrag.ingestion.chunk:main"
+agenticrag-index-milvus = "agenticrag.ingestion.index_milvus:main"
+agenticrag-search = "agenticrag.retrieval.search:main"
+
+[project.optional-dependencies]
+embeddings = [
+    "langchain-huggingface>=1.0,<2.0",
+    "sentence-transformers>=5.0,<6.0",
+]
+milvus = [
+    "langchain-milvus>=0.3,<1.0",
+]
+
+[build-system]
+requires = ["uv_build>=0.12.3,<0.13.0"]
+build-backend = "uv_build"
+
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

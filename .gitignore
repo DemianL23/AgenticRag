@@ -1,0 +1,30 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Local credentials
+.env
+.env.*
+!.env.example
+
+# Generated data, downloaded weights and database storage
+/artifacts/
+/models/
+/volumes/
+*:Zone.Identifier
+
+# Frontend dependencies and build output
+node_modules/
+
+# Tool caches
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
