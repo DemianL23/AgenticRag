@@ -174,6 +174,26 @@ uv run --extra embeddings --extra milvus agenticrag-search \
 
 当前 Milvus collection 使用索引阶段的默认 L2 距离，因此输出的 `score` 是距离值，数值越小表示越接近。后续评测阶段再决定是否固定距离阈值。
 
+## 模块八：Qwen 生成
+
+生成模块位于 `src/agenticrag/generation/`，使用百炼的 OpenAI 兼容接口调用 Qwen。Retriever 和生成器彼此独立：生成器只接收问题与已召回的 `RetrievedChunk`，不会自行查询 Milvus。
+
+安装生成依赖：
+
+```bash
+uv sync --extra generation --extra embeddings --extra milvus
+```
+
+在 `.env` 中配置 `DASHSCOPE_API_KEY` 后，可以运行完整的检索加生成流程：
+
+```bash
+uv run --extra generation --extra embeddings --extra milvus agenticrag-ask \
+  "中铝国际主要有哪些业务板块？" \
+  --k 5
+```
+
+模型会收到带有 `[E1]`、`[E2]` 等编号的证据块。程序只接受模型返回的有效证据编号，再将其映射回真实的 PDF、页码和 `chunk_id`；模型不能自行编造来源。
+
 ## 模块七：Retrieval Evaluation
 
 当前正式评测集位于 `eval/datasets/retrieval_eval_v2.jsonl`，共 47 条问题，覆盖 10 个文档，并包含单个或多个相关 chunk。评测集只记录检索证据，不把答案或其他字段自动送入检索器。
@@ -208,7 +228,7 @@ uv run --extra embeddings --extra milvus agenticrag-eval-retrieval \
 4. 切块，用配置指定的本机 Embedding 模型生成向量，写入 Docker 中的 Milvus（切块、Embedding 接口和批量索引入口已实现）。
 5. 使用 Dense Retrieval 返回真实 chunks（已实现）。
 6. 完成 Retrieval Evaluation 基线（已实现）。
-7. 接入百炼回答模型，并只引用实际送入模型的 chunks。
+7. 接入 Qwen 回答模型，并只引用实际送入模型的 chunks（已实现）。
 8. 实现完整的提问、回答与来源查看前端。
 9. 共用问答入口，运行生成质量评测。
 

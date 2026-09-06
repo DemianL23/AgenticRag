@@ -26,6 +26,7 @@ agenticrag-chunk-corpus = "agenticrag.ingestion.chunk:main"
 agenticrag-index-milvus = "agenticrag.ingestion.index_milvus:main"
 agenticrag-search = "agenticrag.retrieval.search:main"
 agenticrag-eval-retrieval = "eval.retrieval_runner:main"
+agenticrag-ask = "agenticrag.rag.ask:main"
 
 [project.optional-dependencies]
 embeddings = [
@@ -34,6 +35,9 @@ embeddings = [
 ]
 milvus = [
     "langchain-milvus>=0.3,<1.0",
+]
+generation = [
+    "langchain-openai>=1.0,<2.0",
 ]
 
 [build-system]
