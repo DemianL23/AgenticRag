@@ -1,6 +1,6 @@
 # 项目结构讨论
 
-状态：用户已确认 V0 方案。按模块逐步实现；已经完成 uv、最小 FastAPI 服务、单 PDF 逐页解析、语料清单与批量解析、保留页码的文本切块、可切换的本机 Embedding 接口、Milvus/Attu 的 Docker 环境、批量索引入口和 Dense Retrieval 检索适配。下一模块处理百炼回答和引用校验。以下结构描述完整 V0 目标，不表示所有模块已实现。
+状态：用户已确认 V0 方案。按模块逐步实现；已经完成 uv、最小 FastAPI 服务、单 PDF 逐页解析、语料清单与批量解析、保留页码的文本切块、可切换的本机 Embedding 接口、Milvus/Attu 的 Docker 环境、批量索引入口、Dense Retrieval 检索适配和 Retrieval Evaluation 基线。下一模块处理百炼回答和引用校验。以下结构描述完整 V0 目标，不表示所有模块已实现。
 
 ## 已明确
 

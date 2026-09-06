@@ -174,6 +174,19 @@ uv run --extra embeddings --extra milvus agenticrag-search \
 
 当前 Milvus collection 使用索引阶段的默认 L2 距离，因此输出的 `score` 是距离值，数值越小表示越接近。后续评测阶段再决定是否固定距离阈值。
 
+## 模块七：Retrieval Evaluation
+
+当前正式评测集位于 `eval/datasets/retrieval_eval_v2.jsonl`，共 47 条问题，覆盖 10 个文档，并包含单个或多个相关 chunk。评测集只记录检索证据，不把答案或其他字段自动送入检索器。
+
+运行评测：
+
+```bash
+uv run --extra embeddings --extra milvus agenticrag-eval-retrieval \
+  --dataset eval/datasets/retrieval_eval_v2.jsonl
+```
+
+报告写入 `artifacts/eval/retrieval_report.json`，包含总体 Recall@1/3/5、MRR、每道题的 Top-K 结果、来源页码和 score 统计。当前 Recall 按相关 chunk 的命中比例计算；如果只关心“是否至少命中一个”，应单独称为 Hit@K。
+
 ## 这一小步的三个概念
 
 - `pyproject.toml` 描述项目和直接依赖，`uv.lock` 记录解析后的具体依赖版本，`.venv/` 是本机安装它们的环境。
@@ -194,8 +207,9 @@ uv run --extra embeddings --extra milvus agenticrag-search \
 3. 从 QA 建立文档清单，批量生成逐页产物（已实现）。
 4. 切块，用配置指定的本机 Embedding 模型生成向量，写入 Docker 中的 Milvus（切块、Embedding 接口和批量索引入口已实现）。
 5. 使用 Dense Retrieval 返回真实 chunks（已实现）。
-6. 接入百炼回答模型，并只引用实际送入模型的 chunks。
-7. 实现完整的提问、回答与来源查看前端。
-8. 共用问答入口，运行现有 QA 的基线评测。
+6. 完成 Retrieval Evaluation 基线（已实现）。
+7. 接入百炼回答模型，并只引用实际送入模型的 chunks。
+8. 实现完整的提问、回答与来源查看前端。
+9. 共用问答入口，运行生成质量评测。
 
 V0 的会话存储、短期和长期记忆、关系数据库、Unstructured、MinerU 优化留待后续阶段。
