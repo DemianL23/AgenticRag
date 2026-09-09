@@ -26,6 +26,7 @@ agenticrag-chunk-corpus = "agenticrag.ingestion.chunk:main"
 agenticrag-index-milvus = "agenticrag.ingestion.index_milvus:main"
 agenticrag-search = "agenticrag.retrieval.search:main"
 agenticrag-eval-retrieval = "eval.retrieval_runner:main"
+agenticrag-eval-ragas = "eval.ragas.runner:main"
 agenticrag-ask = "agenticrag.rag.ask:main"
 
 [project.optional-dependencies]
@@ -38,6 +39,11 @@ milvus = [
 ]
 generation = [
     "langchain-openai>=1.0,<2.0",
+]
+evaluation = [
+    "ragas==0.4.3",
+    # RAGAS 0.4.3 still imports the legacy VertexAI module removed in 0.4.x.
+    "langchain-community==0.3.31",
 ]
 
 [build-system]

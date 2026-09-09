@@ -57,3 +57,15 @@ def test_rag_answer_service_passes_retrieved_chunks_to_generator() -> None:
     assert result.answer == "答案"
     assert retriever.calls == [("问题", 3)]
     assert generator.calls == [("问题", [_chunk()])]
+
+
+def test_rag_answer_service_trace_exposes_the_exact_retrieved_chunks() -> None:
+    retriever = FakeRetriever(calls=[])
+    generator = FakeGenerator()
+    service = RagAnswerService(retriever, generator)  # type: ignore[arg-type]
+
+    trace = service.answer_with_trace("问题", k=2)
+
+    assert trace.query == "问题"
+    assert trace.answer.answer == "答案"
+    assert trace.retrieved_chunks == (_chunk(),)
