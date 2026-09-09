@@ -123,3 +123,17 @@ def test_reciprocal_rank_uses_first_relevant_rank() -> None:
         ["gold"],
         k=5,
     ) == pytest.approx(1 / 3)
+
+
+def test_evaluate_retrieval_can_name_mrr_cutoff(tmp_path: Path) -> None:
+    dataset = tmp_path / "retrieval_eval_mrr_key.jsonl"
+    _write_dataset(dataset)
+    report = evaluate_retrieval(
+        dataset,
+        FakeRetriever(["gold"]),
+        k=20,
+        mrr_key="MRR@20",
+    )
+
+    assert report["metrics"]["MRR@20"] == 1.0
+    assert "MRR" not in report["metrics"]

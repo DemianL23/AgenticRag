@@ -9,12 +9,12 @@ from pathlib import Path
 from typing import Any
 
 from agenticrag.ingestion.chunk import load_documents_jsonl
-from agenticrag.integrations.embeddings import (
+from agenticrag.rag.integrations.embeddings import (
     EmbeddingConfig,
     create_embeddings,
     embedding_dimension,
 )
-from agenticrag.integrations.milvus import MilvusConfig
+from agenticrag.rag.integrations.milvus import MilvusConfig
 
 
 def build_milvus_index(

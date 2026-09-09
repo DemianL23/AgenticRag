@@ -4,8 +4,8 @@ import types
 import pytest
 from langchain_core.documents import Document
 
-from agenticrag.integrations.embeddings import EmbeddingConfig
-from agenticrag.integrations.milvus import MilvusConfig
+from agenticrag.rag.integrations.embeddings import EmbeddingConfig
+from agenticrag.rag.integrations.milvus import MilvusConfig
 from agenticrag.retrieval.milvus_retriever import MilvusRetriever
 from agenticrag.retrieval.schemas import RetrievedChunk
 

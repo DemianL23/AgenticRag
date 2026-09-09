@@ -6,7 +6,7 @@ import argparse
 import json
 
 from agenticrag.generation.generator import QwenAnswerGenerator
-from agenticrag.integrations.milvus import MilvusConfig
+from agenticrag.rag.integrations.milvus import MilvusConfig
 from agenticrag.rag.service import RagAnswerService
 from agenticrag.retrieval.milvus_retriever import MilvusRetriever
 

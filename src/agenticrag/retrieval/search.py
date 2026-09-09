@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import argparse
 
-from agenticrag.integrations.milvus import MilvusConfig
+from agenticrag.rag.integrations.milvus import MilvusConfig
 from agenticrag.retrieval.milvus_retriever import MilvusRetriever
 
 
@@ -37,7 +37,7 @@ def main() -> None:
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="使用 Milvus 执行 V0 Dense Retrieval。")
     parser.add_argument("query", help="要检索的自然语言问题")
-    parser.add_argument("--k", type=int, default=5, help="返回结果数，默认 5")
+    parser.add_argument("--k", type=int, default=20, help="返回结果数，默认 20")
     parser.add_argument("--uri", help="Milvus 地址，默认读取 MILVUS_URI")
     parser.add_argument(
         "--collection-name",

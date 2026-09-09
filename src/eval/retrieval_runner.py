@@ -1,4 +1,4 @@
-"""Run the offline Dense Retriever benchmark and write its report."""
+"""Run the offline Dense or BM25 Retriever benchmark and write its report."""
 
 from __future__ import annotations
 
@@ -8,7 +8,10 @@ import statistics
 from pathlib import Path
 from typing import Any, Protocol
 
-from agenticrag.integrations.milvus import MilvusConfig
+from agenticrag.rag.integrations.milvus import MilvusConfig
+from agenticrag.rag.integrations.milvus_bm25 import BM25MilvusConfig
+from agenticrag.retrieval.bm25_retriever import BM25Retriever, DEFAULT_BM25_TOP_K
+from agenticrag.retrieval.hybrid_retriever import HybridRetriever, DEFAULT_HYBRID_TOP_K
 from agenticrag.retrieval.milvus_retriever import MilvusRetriever
 
 from .retrieval_metrics import (
@@ -27,7 +30,7 @@ class SearchResult(Protocol):
 class Retriever(Protocol):
     """Minimum retriever shape required by the evaluation runner."""
 
-    def search(self, query: str, k: int = 5) -> list[SearchResult]:
+    def search(self, query: str, k: int = 20) -> list[SearchResult]:
         ...
 
 
@@ -35,6 +38,8 @@ def evaluate_retrieval(
     dataset_path: Path,
     retriever: Retriever,
     k: int = 5,
+    *,
+    mrr_key: str = "MRR",
 ) -> dict[str, Any]:
     """Evaluate a retriever against a JSONL dataset.
 
@@ -74,8 +79,8 @@ def evaluate_retrieval(
             )
             for cutoff in recall_totals
         }
-        query_metrics["MRR"] = reciprocal_rank(retrieved_ids, relevant_ids, k=k)
-        reciprocal_ranks.append(query_metrics["MRR"])
+        query_metrics[mrr_key] = reciprocal_rank(retrieved_ids, relevant_ids, k=k)
+        reciprocal_ranks.append(query_metrics[mrr_key])
 
         ranked_results = []
         for rank, result in enumerate(results, start=1):
@@ -83,7 +88,15 @@ def evaluate_retrieval(
                 "rank": rank,
                 "chunk_id": _result_chunk_id(result),
             }
-            for field_name in ("score", "doc_id", "source", "page"):
+            for field_name in (
+                "score",
+                "doc_id",
+                "source",
+                "page",
+                "dense_rank",
+                "bm25_rank",
+                "rrf_score",
+            ):
                 value = getattr(result, field_name, None)
                 if value is not None:
                     ranked_result[field_name] = value
@@ -108,7 +121,7 @@ def evaluate_retrieval(
         f"Recall@{cutoff}": value / total
         for cutoff, value in recall_totals.items()
     }
-    metrics["MRR"] = mean_reciprocal_rank(reciprocal_ranks)
+    metrics[mrr_key] = mean_reciprocal_rank(reciprocal_ranks)
     return {
         "dataset_size": total,
         "k": k,
@@ -120,19 +133,76 @@ def evaluate_retrieval(
 
 def main() -> None:
     args = _parse_args()
-    base_config = MilvusConfig.from_env()
-    milvus_config = MilvusConfig(
-        uri=args.uri or base_config.uri,
-        collection_name=args.collection_name or base_config.collection_name,
-    )
-    report = evaluate_retrieval(
-        args.dataset,
-        MilvusRetriever(milvus_config=milvus_config),
-        k=args.k,
-    )
-    _write_json(report, args.output)
+    if args.retriever == "hybrid":
+        dense_base = MilvusConfig.from_env()
+        bm25_base = BM25MilvusConfig.from_env()
+        dense_config = MilvusConfig(
+            uri=args.uri or dense_base.uri,
+            collection_name=args.dense_collection or dense_base.collection_name,
+        )
+        bm25_config = BM25MilvusConfig(
+            uri=args.uri or bm25_base.uri,
+            collection_name=args.bm25_collection or bm25_base.collection_name,
+        )
+        k = args.k if args.k is not None else DEFAULT_HYBRID_TOP_K
+        output = args.output or Path("artifacts/eval/retrieval_hybrid_v1_1_report.json")
+        if output.exists() and not args.overwrite:
+            raise FileExistsError(
+                f"Hybrid 评测报告已存在：{output}；如需覆盖请显式传入 --overwrite"
+            )
+        retriever = HybridRetriever(
+            dense_retriever=MilvusRetriever(milvus_config=dense_config),
+            bm25_retriever=BM25Retriever(milvus_config=bm25_config),
+        )
+        report = evaluate_retrieval(
+            args.dataset,
+            retriever,
+            k=k,
+            mrr_key=f"MRR@{k}",
+        )
+        report["retriever"] = "hybrid_rrf"
+        report["collections"] = {
+            "dense": dense_config.collection_name,
+            "bm25": bm25_config.collection_name,
+        }
+    elif args.retriever == "bm25":
+        base_config = BM25MilvusConfig.from_env()
+        milvus_config = BM25MilvusConfig(
+            uri=args.uri or base_config.uri,
+            collection_name=args.collection_name or base_config.collection_name,
+        )
+        k = args.k if args.k is not None else DEFAULT_BM25_TOP_K
+        output = args.output or Path("artifacts/eval/retrieval_bm25_v1_1_report.json")
+        if output.exists() and not args.overwrite:
+            raise FileExistsError(
+                f"BM25 评测报告已存在：{output}；如需覆盖请显式传入 --overwrite"
+            )
+        report = evaluate_retrieval(
+            args.dataset,
+            BM25Retriever(milvus_config=milvus_config),
+            k=k,
+            mrr_key=f"MRR@{k}",
+        )
+        report["retriever"] = "bm25"
+        report["collection_name"] = milvus_config.collection_name
+    else:
+        base_config = MilvusConfig.from_env()
+        milvus_config = MilvusConfig(
+            uri=args.uri or base_config.uri,
+            collection_name=args.collection_name or base_config.collection_name,
+        )
+        k = args.k if args.k is not None else 5
+        output = args.output or Path("artifacts/eval/retrieval_report.json")
+        report = evaluate_retrieval(
+            args.dataset,
+            MilvusRetriever(milvus_config=milvus_config),
+            k=k,
+        )
+        report["retriever"] = "dense"
+        report["collection_name"] = milvus_config.collection_name
+    _write_json(report, output)
     print(json.dumps(report, ensure_ascii=False, indent=2))
-    print(f"报告已写入：{args.output}")
+    print(f"报告已写入：{output}")
 
 
 def _load_dataset(path: Path) -> list[dict[str, Any]]:
@@ -214,13 +284,30 @@ def _score_summary(scores: list[float]) -> dict[str, float | int] | None:
 
 
 def _parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="评测 Dense Retriever 的 Recall@K 和 MRR。")
+    parser = argparse.ArgumentParser(
+        description="评测 Dense 或 BM25 Retriever 的 Recall@K 和 MRR。"
+    )
     parser.add_argument("--dataset", type=Path, required=True, help="retrieval 评测集 JSONL")
-    parser.add_argument("--k", type=int, default=5, help="检索 Top-K，默认 5")
-    parser.add_argument("--output", type=Path, default=Path("artifacts/eval/retrieval_report.json"))
+    parser.add_argument(
+        "--retriever",
+        choices=("dense", "bm25", "hybrid"),
+        default="dense",
+        help="检索器类型，默认 dense；BM25/Hybrid 默认 Top-K 为 20",
+    )
+    parser.add_argument("--k", type=int, help="检索 Top-K；不传时 Dense=5、BM25/Hybrid=20")
+    parser.add_argument("--output", type=Path, help="报告路径；不传时按检索器选择默认路径")
+    parser.add_argument("--overwrite", action="store_true", help="允许覆盖已有 BM25/Hybrid 报告")
     parser.add_argument("--uri", help="Milvus 地址，默认读取 MILVUS_URI")
     parser.add_argument(
         "--collection-name",
         help="Milvus collection 名称，默认读取 MILVUS_COLLECTION",
+    )
+    parser.add_argument(
+        "--dense-collection",
+        help="Hybrid 的 Dense collection，默认读取 MILVUS_COLLECTION",
+    )
+    parser.add_argument(
+        "--bm25-collection",
+        help="Hybrid 的 BM25 collection，默认读取 BM25_MILVUS_COLLECTION",
     )
     return parser.parse_args()

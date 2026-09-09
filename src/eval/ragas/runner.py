@@ -13,8 +13,8 @@ from typing import Protocol
 
 from agenticrag.generation.config import GenerationConfig
 from agenticrag.generation.generator import QwenAnswerGenerator
-from agenticrag.integrations.embeddings import EmbeddingConfig
-from agenticrag.integrations.milvus import MilvusConfig
+from agenticrag.rag.integrations.embeddings import EmbeddingConfig
+from agenticrag.rag.integrations.milvus import MilvusConfig
 from agenticrag.rag.service import RagAnswerService, RagAnswerTrace
 from agenticrag.retrieval.milvus_retriever import MilvusRetriever
 from agenticrag.retrieval.schemas import RetrievedChunk

@@ -151,6 +151,19 @@ uv run agenticrag-index-milvus \
 
 `--drop-old` 只在明确需要重建同名 collection 时使用。默认不删除已有数据。索引报告会写到 `artifacts/chunks/pymupdf/v0/milvus_report.json`，包含 collection 名称、向量维度、Embedding 配置和写入 chunk 数量。
 
+### V1.1 BM25 collection
+
+V1.1 使用 Milvus 内置 BM25，在同一份 chunk corpus 上建立独立的词法检索 collection。它从 `v0_documents.jsonl` 按 `doc_id` 读取文档语言，支持中文和英文 analyzer；不会重新计算 Dense embedding，也不会修改 V0 collection。
+
+```bash
+uv run agenticrag-index-bm25 \
+  --chunks-dir artifacts/chunks/pymupdf/v0 \
+  --manifest artifacts/manifests/v0_documents.jsonl \
+  --drop-old
+```
+
+默认 collection 为 `rag_v1_1_bm25_multilingual_800_120`，也可以通过 `BM25_MILVUS_COLLECTION` 修改。已有 collection 默认拒绝写入，只有显式传入 `--drop-old` 或设置 `BM25_MILVUS_DROP_OLD=true` 才会重建。建库报告写入 `artifacts/chunks/pymupdf/v0/bm25_milvus_report.json`。
+
 ## 模块六：Dense Retrieval
 
 检索模块位于 `src/agenticrag/retrieval/`。V0 只做 Dense Retrieval：使用与索引时相同的 Embedding 模型，将问题转换为查询向量，再从 Milvus 返回 Top-K chunks。它不调用大模型，也不包含 BM25、Hybrid Search、Reranker 或 Query Rewrite。
@@ -173,6 +186,22 @@ uv run --extra embeddings --extra milvus agenticrag-search \
 每条结果都会输出文本、相似度数值、PDF 来源、物理页码和 `chunk_id`。这些结果就是后续交给回答模型并生成引用的候选证据。
 
 当前 Milvus collection 使用索引阶段的默认 L2 距离，因此输出的 `score` 是距离值，数值越小表示越接近。后续评测阶段再决定是否固定距离阈值。
+
+V1.1 BM25 Retriever 使用独立的 BM25 collection，默认返回 Top-20；原始 BM25 `score` 越高表示排名越靠前：
+
+```bash
+uv run agenticrag-search-bm25 \
+  "中铝国际主要有哪些业务板块？" \
+  --k 20
+```
+
+Hybrid + RRF 检索：
+
+```bash
+uv run agenticrag-search-hybrid \
+  "中铝国际主要有哪些业务板块？" \
+  --k 20
+```
 
 ## 模块八：Qwen 生成
 
@@ -198,7 +227,7 @@ uv run --extra generation --extra embeddings --extra milvus agenticrag-ask \
 
 当前正式评测集位于 `eval/datasets/retrieval_eval_v2.jsonl`，共 47 条问题，覆盖 10 个文档，并包含单个或多个相关 chunk。评测集只记录检索证据，不把答案或其他字段自动送入检索器。
 
-运行评测：
+运行 V0 Dense 评测：
 
 ```bash
 uv run --extra embeddings --extra milvus agenticrag-eval-retrieval \
@@ -206,6 +235,26 @@ uv run --extra embeddings --extra milvus agenticrag-eval-retrieval \
 ```
 
 报告写入 `artifacts/eval/retrieval_report.json`，包含总体 Recall@1/3/5、MRR、每道题的 Top-K 结果、来源页码和 score 统计。当前 Recall 按相关 chunk 的命中比例计算；如果只关心“是否至少命中一个”，应单独称为 Hit@K。
+
+运行 V1.1 BM25 评测：
+
+```bash
+uv run agenticrag-eval-retrieval \
+  --retriever bm25 \
+  --dataset eval/datasets/retrieval_eval_v2.jsonl
+```
+
+BM25 默认使用 Top-20，报告写入 `artifacts/eval/retrieval_bm25_v1_1_report.json`，包含 Recall@1/3/5/20、MRR@20 和逐题结果。为防止误覆盖已冻结结果，BM25 报告已存在时必须显式传入 `--overwrite`。
+
+运行 V1.1 Hybrid + RRF 评测：
+
+```bash
+uv run agenticrag-eval-retrieval \
+  --retriever hybrid \
+  --dataset eval/datasets/retrieval_eval_v2.jsonl
+```
+
+Hybrid 默认让 Dense 和 BM25 各取 Top-20，使用 `rrf_k=60`，报告写入 `artifacts/eval/retrieval_hybrid_v1_1_report.json`。逐题结果会保留 `dense_rank`、`bm25_rank` 和 `rrf_score`。
 
 ## 这一小步的三个概念
 

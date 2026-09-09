@@ -6,8 +6,8 @@ from pathlib import Path
 from langchain_core.documents import Document
 
 from agenticrag.ingestion.index_milvus import build_milvus_index, default_collection_name
-from agenticrag.integrations.embeddings import EmbeddingConfig
-from agenticrag.integrations.milvus import MilvusConfig
+from agenticrag.rag.integrations.embeddings import EmbeddingConfig
+from agenticrag.rag.integrations.milvus import MilvusConfig
 
 
 def test_default_collection_name_contains_model_and_chunk_settings(tmp_path: Path) -> None:

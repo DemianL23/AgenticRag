@@ -7,7 +7,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
-from agenticrag.integrations.embeddings import (
+from agenticrag.rag.integrations.embeddings import (
     DEFAULT_EMBEDDING_BATCH_SIZE,
     DEFAULT_EMBEDDING_DEVICE,
     DEFAULT_EMBEDDING_MODEL,

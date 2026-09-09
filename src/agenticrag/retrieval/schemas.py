@@ -20,3 +20,12 @@ class RetrievedChunk:
     def to_record(self) -> dict[str, Any]:
         """Return a JSON-serializable representation for APIs and CLI output."""
         return asdict(self)
+
+
+@dataclass(frozen=True, slots=True)
+class HybridRetrievedChunk(RetrievedChunk):
+    """One RRF-fused chunk with its rank in each retrieval route."""
+
+    dense_rank: int | None = None
+    bm25_rank: int | None = None
+    rrf_score: float = 0.0

@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from agenticrag.integrations.embeddings import (
+from agenticrag.rag.integrations.embeddings import (
     EmbeddingConfig,
     create_embeddings,
     embedding_dimension,

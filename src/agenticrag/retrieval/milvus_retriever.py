@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from agenticrag.integrations.embeddings import EmbeddingConfig, create_embeddings
-from agenticrag.integrations.milvus import MilvusConfig
+from agenticrag.rag.integrations.embeddings import EmbeddingConfig, create_embeddings
+from agenticrag.rag.integrations.milvus import MilvusConfig
 from agenticrag.retrieval.base import BaseRetriever
 from agenticrag.retrieval.schemas import RetrievedChunk
 
@@ -36,7 +36,7 @@ class MilvusRetriever(BaseRetriever):
         self.embeddings = create_embeddings(self.embedding_config)
         self.vector_store = self._create_vector_store()
 
-    def search(self, query: str, k: int = 5) -> list[RetrievedChunk]:
+    def search(self, query: str, k: int = 20) -> list[RetrievedChunk]:
         """Return the top ``k`` chunks and their original citation metadata."""
         clean_query = query.strip()
         if not clean_query:
