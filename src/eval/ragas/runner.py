@@ -22,6 +22,7 @@ from agenticrag.retrieval.schemas import RetrievedChunk
 from .config import RagasEvaluatorConfig
 from .dataset import load_qa_dataset
 from .evaluator import RagasEvaluator, RagasMetricResult
+from ..numeric_correctness import NUMERIC_CORRECTNESS, numeric_correctness
 from .providers import create_ragas_evaluator
 from .report import RagasReport, SampleReport, aggregate_scores, write_report
 
@@ -66,10 +67,11 @@ async def evaluate_end_to_end(
         _validate_positive("limit", limit)
     qa_samples = load_qa_dataset(Path(dataset_path), limit=limit)
     sample_reports: list[SampleReport] = []
+    report_metric_names = (*evaluator.metric_names, NUMERIC_CORRECTNESS)
 
     for index, sample in enumerate(qa_samples, start=1):
         print(f"[{index}/{len(qa_samples)}] {sample.sample_id}: RAG + RAGAS")
-        blank_scores = {name: None for name in evaluator.metric_names}
+        blank_scores = {name: None for name in report_metric_names}
         try:
             trace = service.answer_with_trace(sample.question, k=top_k)
             contexts = retrieved_contexts_from_chunks(trace.retrieved_chunks)
@@ -79,6 +81,12 @@ async def evaluate_end_to_end(
                 response=trace.answer.answer,
                 retrieved_contexts=contexts,
             )
+            numeric_score = numeric_correctness(
+                sample.reference,
+                trace.answer.answer,
+                task_type=sample.task_type,
+            )
+            scores = {**result.scores, NUMERIC_CORRECTNESS: numeric_score}
             sample_reports.append(
                 SampleReport(
                     sample_id=sample.sample_id,
@@ -89,7 +97,7 @@ async def evaluate_end_to_end(
                         chunk.chunk_id for chunk in trace.retrieved_chunks
                     ),
                     retrieved_contexts=tuple(contexts),
-                    metrics=result.scores,
+                    metrics=scores,
                     metric_reasons=result.reasons,
                     evaluation_error=result.errors or None,
                 )
@@ -110,7 +118,7 @@ async def evaluate_end_to_end(
             )
 
     aggregate_metrics, aggregate_counts = aggregate_scores(
-        sample_reports, evaluator.metric_names
+        sample_reports, report_metric_names
     )
     failed_samples = sum(
         sample.evaluation_error is not None for sample in sample_reports
@@ -126,7 +134,7 @@ async def evaluate_end_to_end(
         evaluator_model=evaluator_model,
         evaluator_embedding_model=evaluator_embedding_model,
         ragas_version=ragas_version,
-        metrics=evaluator.metric_names,
+        metrics=report_metric_names,
         context_entity_recall={
             "enabled": "context_entity_recall" in evaluator.metric_names,
             "rationale": (

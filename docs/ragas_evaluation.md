@@ -156,7 +156,7 @@ RAGAS_EVALUATOR_API_KEY=your-api-key
 RAGAS_EVALUATOR_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
 RAGAS_EVALUATOR_MODEL=qwen-plus
 RAGAS_EVALUATOR_TEMPERATURE=0
-RAGAS_EVALUATOR_MAX_TOKENS=2048
+RAGAS_EVALUATOR_MAX_TOKENS=4096
 RAGAS_EVALUATOR_TIMEOUT=120
 RAGAS_EVALUATOR_MAX_RETRIES=2
 RAGAS_EVALUATOR_ENABLE_THINKING=false
@@ -176,9 +176,15 @@ RAGAS_EVALUATOR_EMBEDDING_QUERY_PROMPT_NAME=query
 
 RAGAS Judge 通过 `openai.AsyncOpenAI` 连接 DashScope 的 OpenAI-compatible endpoint，再交给 RAGAS 0.4 的 `llm_factory()`。Evaluator embedding 直接使用 RAGAS 0.4 的现代 `HuggingFaceEmbeddings` provider，没有使用已弃用的 LangChain wrapper。
 
+## 7. 确定性数值正确性
+
+除 RAGAS 的 `answer_correctness` 外，报告还包含 `numeric_correctness`。它只适用于数值型 QA：从 reference 和生成答案中提取数值，去掉千分位分隔符，统一金额单位，并根据 reference 的小数位数使用半个最小显示单位作为 tolerance。百分比与纯小数表示也支持等价比较，例如 `0.6116` 与 `61.16%`。
+
+生成答案可能同时包含最终结果和中间计算值，因此指标要求每个 reference 数值都能在生成答案中找到一个不同的匹配值；额外的解释性数值不会单独导致失败。非数值型 QA 的该指标为 `null`，不参与 aggregate average。它是 RAGAS `answer_correctness` 的补充，不替代 LLM Judge。
+
 若 Generator 与 Judge 使用同一模型，可能出现风格偏好和共同盲点：Judge 更容易认可与自己表达方式相似的答案。正式对比实验应固定同一个 Judge，并抽样做人审；条件允许时再用不同模型复评争议样本。当前 smoke 中被测生成模型为 `glm-5.2`，Judge 为 `qwen-plus`，二者不同。
 
-## 7. 新增模块职责
+## 8. 新增模块职责
 
 | 文件 | 职责 |
 | --- | --- |
@@ -188,11 +194,12 @@ RAGAS Judge 通过 `openai.AsyncOpenAI` 连接 DashScope 的 OpenAI-compatible e
 | `src/eval/ragas/evaluator.py` | 调用每个 `metric.ascore()`；隔离单指标错误 |
 | `src/eval/ragas/report.py` | 报告数据结构、聚合和原子 JSON 写入 |
 | `src/eval/ragas/runner.py` | 组织 QA → RAG → RAGAS → Report，提供 CLI |
+| `src/eval/numeric_correctness.py` | 提取、标准化并确定性比较数值答案 |
 | `src/agenticrag/rag/service.py` | 新增 `answer_with_trace()`，暴露答案和真实 chunks |
 
 同一条样本的六项指标彼此独立，因此并发执行；不同 QA 仍按顺序处理，避免突然放大生成模型、Judge API 和本地 embedding 的负载。
 
-## 8. 安装和运行
+## 9. 安装和运行
 
 安装完整评测需要的四组可选依赖：
 
@@ -243,7 +250,7 @@ CLI 参数：
 - `--output`：JSON 报告路径；
 - `--uri`、`--collection-name`：临时覆盖 Milvus 配置。
 
-## 9. 如何阅读报告
+## 10. 如何阅读报告
 
 顶层关键字段：
 
@@ -271,20 +278,21 @@ Smoke test 的实际结果（1 条、Top-5、RAGAS 0.4.3）：
 
 这条样本 Context Recall 为 1 而 Entity Recall 为 0，说明语义归因认为关键信息已覆盖，但实体抽取后的集合没有匹配。应先查看 reference 与五段 context 中金额、年份和公司名的写法，再判断是规范化问题、中文实体抽取问题还是实际漏检。
 
-完整评测的实际结果（19 条、Top-5、被测模型 `glm-5.2`、Judge `qwen-plus`）：
+完整评测的实际结果（19 条、Top-5、被测模型 `glm-5.2`、Judge `qwen-plus`）已冻结为 `Naive RAG V0 Baseline`。本次使用 `RAGAS_EVALUATOR_MAX_TOKENS=4096`，19 条样本全部完成，`failed_samples=0`：
 
 | 指标 | 平均分 | 有效样本数 |
 | --- | ---: | ---: |
-| Faithfulness | 0.7074 | 18 |
-| Answer Relevancy | 0.6024 | 19 |
-| Answer Correctness | 0.5419 | 19 |
+| Faithfulness | 0.6259 | 19 |
+| Answer Relevancy | 0.5813 | 19 |
+| Answer Correctness | 0.5806 | 19 |
 | Context Recall | 0.6842 | 19 |
-| Context Precision | 0.6301 | 19 |
-| Context Entity Recall | 0.2737 | 19 |
+| Context Precision | 0.6181 | 19 |
+| Context Entity Recall | 0.1904 | 19 |
+| Numeric Correctness | 0.5714 | 14 |
 
-`indCN_00294` 的 Faithfulness 结构化输出超过 Judge 的 2048 token 上限，因此该项为 `null`；其余五项以及后续 17 条样本继续完成。这正是单指标容错的预期行为。遇到同类长答案时，可以在 `.env` 中设置 `RAGAS_EVALUATOR_MAX_TOKENS=4096` 后重跑。
+其中 `numeric_correctness` 只对 14 条数值型 QA 生效，另外 5 条叙述型 QA 记录为 `null`，不参与平均。后续 V1、V2 应固定这份报告及其配置，与该 baseline 对比；若 Judge 模型或答案长度发生变化，应重新检查是否仍有 `IncompleteOutputException`。
 
-## 10. 低分时先查哪里
+## 11. 低分时先查哪里
 
 | 低分组合 | 优先排查 | 常见原因 |
 | --- | --- | --- |
@@ -298,7 +306,7 @@ Smoke test 的实际结果（1 条、Top-5、RAGAS 0.4.3）：
 
 排查一条样本时，先读 `question → reference → retrieved_chunk_ids/contexts → generated_answer`，最后看指标。分数是定位线索，不是事实裁决。
 
-## 11. 当前限制与后续实验
+## 12. 当前限制与后续实验
 
 1. RAGAS 指标大量依赖 Judge LLM。temperature 为 0 只能降低波动，不能保证不同时间、模型版本和供应商实现完全一致。
 2. 六项指标会产生多次 Judge 请求，完整评测有明显时间和 API 成本。先用 `--limit` 验证配置，再跑全量。

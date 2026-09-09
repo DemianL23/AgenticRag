@@ -15,6 +15,7 @@ class QaSample:
     sample_id: str
     question: str
     reference: str
+    task_type: str | None = None
 
 
 def load_qa_dataset(path: Path, *, limit: int | None = None) -> list[QaSample]:
@@ -83,4 +84,9 @@ def _to_sample(record: Any, line_number: int, path: Path) -> QaSample:
         sample_id=str(raw_id).strip(),
         question=question.strip(),
         reference=gold_to_reference(record["gold"]),
+        task_type=(
+            str(record["task_type"]).strip()
+            if isinstance(record.get("task_type"), str)
+            else None
+        ),
     )

@@ -48,6 +48,7 @@ def test_qa_loader_maps_question_and_supported_gold_types(tmp_path: Path) -> Non
     assert [sample.sample_id for sample in samples] == ["a", "b", "line_3"]
     assert samples[0].question == "问题一"
     assert samples[0].reference == "- 答案甲\n- 答案乙"
+    assert samples[0].task_type is None
     assert samples[1].reference == "0.0502"
     assert samples[2].reference == "答案三"
 
@@ -136,6 +137,7 @@ def test_evaluator_config_is_independent_from_generation_config(
     assert config.model != "qwen-max"
     assert config.api_key == "shared-test-key"
     assert config.base_url == "https://judge.example/v1"
+    assert config.max_tokens == 4096
     assert config.to_record()["api_key"] is None
     assert config.to_record()["api_key_configured"] is True
 
@@ -219,8 +221,49 @@ def test_end_to_end_runner_materializes_real_response_and_contexts(
     assert report.aggregate_metrics == {
         "faithfulness": 1.0,
         "answer_correctness": 0.5,
+        "numeric_correctness": None,
     }
     assert report.samples[0].retrieved_chunk_ids == ("doc_000:p0004:c000",)
+
+
+@dataclass
+class NumericFakeService:
+    def answer_with_trace(self, query: str, *, k: int = 5) -> RagAnswerTrace:
+        return RagAnswerTrace(
+            query=query,
+            answer=GeneratedAnswer(answer="现金比率为61.16%", citations=()),
+            retrieved_chunks=(_chunk(),),
+        )
+
+
+def test_end_to_end_runner_adds_numeric_correctness_to_sample_and_aggregate(
+    tmp_path: Path,
+) -> None:
+    dataset = tmp_path / "qa.jsonl"
+    dataset.write_text(
+        '{"finqa_id":"qa_1","question":"问题","gold":0.6116,"task_type":"Implicit_Reasoning"}\n',
+        encoding="utf-8",
+    )
+
+    report = asyncio.run(
+        evaluate_end_to_end(
+            dataset,
+            NumericFakeService(),
+            FakeEvaluator(),
+            top_k=5,
+            limit=None,
+            generation_model="qwen-plus",
+            embedding_model="qwen-embedding",
+            evaluator_model="qwen-max",
+            evaluator_embedding_model="qwen-embedding",
+            ragas_version="0.4.3",
+        )
+    )
+
+    assert report.samples[0].metrics["numeric_correctness"] == 1.0
+    assert report.aggregate_metrics["numeric_correctness"] == 1.0
+    assert report.aggregate_metric_counts["numeric_correctness"] == 1
+    assert "numeric_correctness" in report.metrics
 
 
 def test_report_serialization_contains_required_audit_fields(tmp_path: Path) -> None:

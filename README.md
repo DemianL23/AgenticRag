@@ -4,7 +4,7 @@
 
 ## 当前进度
 
-已确认 V0 设计。当前已经完成 uv 管理的 Python 项目、最小 FastAPI 服务、PyMuPDF 逐页解析、按文档去重的批量解析、保留页码的文本切块、可切换的本机 Embedding 接口、Milvus/Attu 的 Docker 环境、批量索引入口和 Dense Retrieval 检索 CLI。现有数据为 `corpus/` 中的 10 份 PDF，以及 `qa.jsonl` 中的 19 道题。百炼和完整问答网页按模块逐步实现。
+已确认 V0 设计。当前已经完成 uv 管理的 Python 项目、最小 FastAPI 服务、PyMuPDF 逐页解析、按文档去重的批量解析、保留页码的文本切块、可切换的本机 Embedding 接口、Milvus/Attu 的 Docker 环境、批量索引入口、Dense Retrieval 检索 CLI、Qwen 生成、引用校验和 RAGAS 评测。现有数据为 `corpus/` 中的 10 份 PDF，以及 `qa.jsonl` 中的 19 道题。完整结果已冻结为 `Naive RAG V0 Baseline`；问答 API 和网页前端按后续模块实现。
 
 当前沿用初始化时的 Python 3.13 和包名 `agenticrag`。设计见 [项目设计](docs/design-discussion.md)，术语见 [CONTEXT.md](CONTEXT.md)。
 
