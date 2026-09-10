@@ -29,6 +29,7 @@ def test_rrf_deduplicates_and_preserves_both_route_ranks() -> None:
     assert results[1].bm25_rank is None
     assert results[2].dense_rank is None
     assert results[2].bm25_rank == 2
+    assert [result.rrf_rank for result in results] == [1, 2, 3]
 
 
 def test_rrf_limit_and_deterministic_tie_break() -> None:
@@ -53,4 +54,3 @@ def test_rrf_allows_one_route_to_be_empty() -> None:
     assert len(results) == 1
     assert results[0].dense_rank is None
     assert results[0].bm25_rank == 1
-

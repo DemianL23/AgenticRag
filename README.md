@@ -4,7 +4,7 @@
 
 ## 当前进度
 
-已确认 V0 设计。当前已经完成 uv 管理的 Python 项目、最小 FastAPI 服务、PyMuPDF 逐页解析、按文档去重的批量解析、保留页码的文本切块、可切换的本机 Embedding 接口、Milvus/Attu 的 Docker 环境、批量索引入口、Dense Retrieval 检索 CLI、Qwen 生成、引用校验和 RAGAS 评测。现有数据为 `corpus/` 中的 10 份 PDF，以及 `qa.jsonl` 中的 19 道题。完整结果已冻结为 `Naive RAG V0 Baseline`；问答 API 和网页前端按后续模块实现。
+已确认 V0 设计。当前已经完成 uv 管理的 Python 项目、最小 FastAPI 服务、PyMuPDF 逐页解析、按文档去重的批量解析、保留页码的文本切块、可切换的本机 Embedding 接口、Milvus/Attu 的 Docker 环境、批量索引入口、Dense Retrieval 检索 CLI、Qwen 生成、引用校验和 RAGAS 评测。现有数据为 `corpus/` 中的 10 份 PDF，以及 `qa.jsonl` 中的 19 道题。完整结果已冻结为 `Naive RAG V0 Baseline`；V1.1 Hybrid + RRF 与 [V1.2-A 本地 Reranker baseline](docs/v1_2_a_baseline.md) 也已完成，问答 API 和网页前端按后续模块实现。
 
 当前沿用初始化时的 Python 3.13 和包名 `agenticrag`。设计见 [项目设计](docs/design-discussion.md)，术语见 [CONTEXT.md](CONTEXT.md)。
 
@@ -203,6 +203,21 @@ uv run agenticrag-search-hybrid \
   --k 20
 ```
 
+V1.2-A 在完整的 Dense Top-20 + BM25 Top-20 去重候选池上运行本地
+`BAAI/bge-reranker-v2-m3`，最终返回 Top-5。RRF 只负责候选初排，最终顺序只看
+rerank score；模型或 score 异常时整条 Query 回退到 RRF。
+
+```bash
+uv sync --extra embeddings --extra milvus --extra reranking
+
+uv run agenticrag-search-reranker \
+  "中铝国际主要有哪些业务板块？"
+```
+
+模型约 2.29 GB，第一次运行允许下载并缓存。完成下载后，可以设置
+`RERANK_LOCAL_FILES_ONLY=true` 验证离线复现。默认使用 CPU、batch size 8、总输入长度
+512；CUDA 和 FP16 只能通过 `RERANK_DEVICE`、`RERANK_USE_FP16` 显式开启。
+
 ## 模块八：Qwen 生成
 
 生成模块位于 `src/agenticrag/generation/`，使用百炼的 OpenAI 兼容接口调用 Qwen。Retriever 和生成器彼此独立：生成器只接收问题与已召回的 `RetrievedChunk`，不会自行查询 Milvus。
@@ -255,6 +270,21 @@ uv run agenticrag-eval-retrieval \
 ```
 
 Hybrid 默认让 Dense 和 BM25 各取 Top-20，使用 `rrf_k=60`，报告写入 `artifacts/eval/retrieval_hybrid_v1_1_report.json`。逐题结果会保留 `dense_rank`、`bm25_rank` 和 `rrf_score`。
+
+运行 V1.2-A 本地 Reranker 评测：
+
+```bash
+uv run --extra embeddings --extra milvus --extra reranking \
+  agenticrag-eval-retrieval \
+  --retriever reranker \
+  --dataset eval/datasets/retrieval_eval_v2.jsonl
+```
+
+独立报告写入 `artifacts/eval/retrieval_reranker_v1_2_a_report.json`，不会覆盖 V0 或
+V1.1。报告分别记录最终 Recall@1/3/5 与 MRR@5、RRF Recall@20、完整 union pool
+coverage、fallback/非法 score 数量，以及候选生成、模型加载、推理和端到端耗时。
+只有 47 条全部完成且 `fallback_queries=0`、`invalid_score_queries=0` 时，报告才标记为
+可冻结的 V1.2-A baseline。
 
 ## 这一小步的三个概念
 

@@ -29,3 +29,14 @@ class HybridRetrievedChunk(RetrievedChunk):
     dense_rank: int | None = None
     bm25_rank: int | None = None
     rrf_score: float = 0.0
+    rrf_rank: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class RerankedChunk(HybridRetrievedChunk):
+    """One final V1.2 chunk with both initial and final ranking evidence."""
+
+    rerank_score: float | None = None
+    final_rank: int = 0
+    fallback_used: bool = False
+    fallback_reason: str | None = None

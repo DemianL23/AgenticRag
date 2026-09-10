@@ -45,8 +45,9 @@ def fuse_ranked_results(
             dense_rank=candidate.dense_rank,
             bm25_rank=candidate.bm25_rank,
             rrf_score=candidate.rrf_score,
+            rrf_rank=rrf_rank,
         )
-        for candidate in ranked_candidates[:limit]
+        for rrf_rank, candidate in enumerate(ranked_candidates[:limit], start=1)
     ]
 
 
@@ -91,4 +92,3 @@ def _sort_key(candidate: _FusionCandidate) -> tuple[float, int, int, int, str]:
 def _validate_positive_int(value: int, field_name: str) -> None:
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
         raise ValueError(f"{field_name} 必须是正整数")
-

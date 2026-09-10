@@ -48,7 +48,7 @@ def evaluate_retrieval(
     ranking are reported, plus Recall@k.
     """
     _validate_k(k)
-    samples = _load_dataset(Path(dataset_path))
+    samples = load_retrieval_dataset(Path(dataset_path))
     if not samples:
         raise ValueError(f"评测集不能为空：{dataset_path}")
 
@@ -133,7 +133,53 @@ def evaluate_retrieval(
 
 def main() -> None:
     args = _parse_args()
-    if args.retriever == "hybrid":
+    if args.retriever == "reranker":
+        from agenticrag.reranking.bge import BGEReranker
+        from agenticrag.reranking.config import RerankerConfig
+        from agenticrag.retrieval.reranking_retriever import (
+            DEFAULT_RERANK_FINAL_TOP_K,
+            RerankingRetriever,
+        )
+
+        from .reranking_runner import evaluate_reranking
+
+        dense_base = MilvusConfig.from_env()
+        bm25_base = BM25MilvusConfig.from_env()
+        dense_config = MilvusConfig(
+            uri=args.uri or dense_base.uri,
+            collection_name=args.dense_collection or dense_base.collection_name,
+        )
+        bm25_config = BM25MilvusConfig(
+            uri=args.uri or bm25_base.uri,
+            collection_name=args.bm25_collection or bm25_base.collection_name,
+        )
+        k = args.k if args.k is not None else DEFAULT_RERANK_FINAL_TOP_K
+        output = args.output or Path(
+            "artifacts/eval/retrieval_reranker_v1_2_a_report.json"
+        )
+        if output.exists() and not args.overwrite:
+            raise FileExistsError(
+                f"V1.2-A 评测报告已存在：{output}；如需覆盖请显式传入 --overwrite"
+            )
+        retriever = RerankingRetriever(
+            hybrid_retriever=HybridRetriever(
+                dense_retriever=MilvusRetriever(milvus_config=dense_config),
+                bm25_retriever=BM25Retriever(milvus_config=bm25_config),
+            ),
+            reranker=BGEReranker(RerankerConfig.from_env()),
+        )
+        report = evaluate_reranking(
+            args.dataset,
+            retriever,
+            final_k=k,
+            dense_baseline_path=args.dense_baseline_report,
+            hybrid_baseline_path=args.hybrid_baseline_report,
+        )
+        report["collections"] = {
+            "dense": dense_config.collection_name,
+            "bm25": bm25_config.collection_name,
+        }
+    elif args.retriever == "hybrid":
         dense_base = MilvusConfig.from_env()
         bm25_base = BM25MilvusConfig.from_env()
         dense_config = MilvusConfig(
@@ -205,7 +251,7 @@ def main() -> None:
     print(f"报告已写入：{output}")
 
 
-def _load_dataset(path: Path) -> list[dict[str, Any]]:
+def load_retrieval_dataset(path: Path) -> list[dict[str, Any]]:
     if not path.is_file():
         raise FileNotFoundError(f"评测集不存在：{path}")
 
@@ -285,18 +331,22 @@ def _score_summary(scores: list[float]) -> dict[str, float | int] | None:
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="评测 Dense 或 BM25 Retriever 的 Recall@K 和 MRR。"
+        description="评测 Dense、BM25、Hybrid 或 Reranker Retrieval 的 Recall@K 和 MRR。"
     )
     parser.add_argument("--dataset", type=Path, required=True, help="retrieval 评测集 JSONL")
     parser.add_argument(
         "--retriever",
-        choices=("dense", "bm25", "hybrid"),
+        choices=("dense", "bm25", "hybrid", "reranker"),
         default="dense",
-        help="检索器类型，默认 dense；BM25/Hybrid 默认 Top-K 为 20",
+        help="检索器类型；reranker 默认最终 Top-5",
     )
-    parser.add_argument("--k", type=int, help="检索 Top-K；不传时 Dense=5、BM25/Hybrid=20")
+    parser.add_argument(
+        "--k",
+        type=int,
+        help="结果 Top-K；不传时 Dense/Reranker=5、BM25/Hybrid=20",
+    )
     parser.add_argument("--output", type=Path, help="报告路径；不传时按检索器选择默认路径")
-    parser.add_argument("--overwrite", action="store_true", help="允许覆盖已有 BM25/Hybrid 报告")
+    parser.add_argument("--overwrite", action="store_true", help="允许覆盖已有实验报告")
     parser.add_argument("--uri", help="Milvus 地址，默认读取 MILVUS_URI")
     parser.add_argument(
         "--collection-name",
@@ -309,5 +359,17 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--bm25-collection",
         help="Hybrid 的 BM25 collection，默认读取 BM25_MILVUS_COLLECTION",
+    )
+    parser.add_argument(
+        "--dense-baseline-report",
+        type=Path,
+        default=Path("artifacts/eval/retrieval_report.json"),
+        help="V1.2 对比使用的 V0 Dense 报告",
+    )
+    parser.add_argument(
+        "--hybrid-baseline-report",
+        type=Path,
+        default=Path("artifacts/eval/retrieval_hybrid_v1_1_report.json"),
+        help="V1.2 对比使用的 V1.1 Hybrid 报告",
     )
     return parser.parse_args()

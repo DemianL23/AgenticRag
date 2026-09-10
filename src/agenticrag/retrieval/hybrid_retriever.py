@@ -9,6 +9,7 @@ from agenticrag.retrieval.rrf import DEFAULT_RRF_K, fuse_ranked_results
 from agenticrag.retrieval.schemas import HybridRetrievedChunk
 
 DEFAULT_HYBRID_TOP_K = 20
+DEFAULT_HYBRID_ROUTE_TOP_K = 20
 
 
 class HybridRetriever(BaseRetriever):
@@ -31,18 +32,27 @@ class HybridRetriever(BaseRetriever):
         k: int = DEFAULT_HYBRID_TOP_K,
     ) -> list[HybridRetrievedChunk]:
         """Search both routes with the same query and fuse their rankings."""
+        candidates = self.candidate_pool(query, route_k=k)
+        return candidates[:k]
+
+    def candidate_pool(
+        self,
+        query: str,
+        *,
+        route_k: int = DEFAULT_HYBRID_ROUTE_TOP_K,
+    ) -> list[HybridRetrievedChunk]:
+        """Return the complete deduplicated Dense + BM25 candidate pool."""
         clean_query = query.strip()
         if not clean_query:
             raise ValueError("query 不能为空")
-        if isinstance(k, bool) or not isinstance(k, int) or k <= 0:
-            raise ValueError("k 必须是正整数")
+        if isinstance(route_k, bool) or not isinstance(route_k, int) or route_k <= 0:
+            raise ValueError("route_k 必须是正整数")
 
-        dense_results = self.dense_retriever.search(clean_query, k=k)
-        bm25_results = self.bm25_retriever.search(clean_query, k=k)
+        dense_results = self.dense_retriever.search(clean_query, k=route_k)
+        bm25_results = self.bm25_retriever.search(clean_query, k=route_k)
         return fuse_ranked_results(
             dense_results,
             bm25_results,
-            limit=k,
+            limit=route_k * 2,
             rrf_k=self.rrf_k,
         )
-
