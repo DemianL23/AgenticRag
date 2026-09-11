@@ -224,6 +224,7 @@ def test_end_to_end_runner_materializes_real_response_and_contexts(
         "numeric_correctness": None,
     }
     assert report.samples[0].retrieved_chunk_ids == ("doc_000:p0004:c000",)
+    assert report.retrieval_summary is None
 
 
 @dataclass
@@ -307,3 +308,5 @@ def test_report_serialization_contains_required_audit_fields(tmp_path: Path) -> 
     assert saved["samples"][0]["response"] == "生成答案"
     assert saved["samples"][0]["retrieved_chunk_ids"] == ["chunk_1"]
     assert saved["samples"][0]["evaluation_error"] is None
+    assert saved["report_name"] == "ragas"
+    assert saved["run_id"] is None

@@ -1244,6 +1244,18 @@ tests/eval/v2/
 - 生成不可覆盖的 control report。
 - 不加入任何 V2 决策逻辑。
 
+Module 0 的实现入口为：
+
+```bash
+uv run agenticrag-eval-v1-2-control
+```
+
+默认评测根目录 `qa.jsonl` 的全部 QA，最终送入 Generator 的结果为 V1.2
+Reranker Top-5。报告写入 `artifacts/eval/v1_2_end_to_end_control/<run_id>/report.json`；
+每次运行生成新的 UUID `run_id`，若指定的 `--output` 已存在则拒绝覆盖。
+报告同时保存每条样本的答案、上下文、RRF/rerank trace、fallback/耗时、
+resolved config 和模型 revision。
+
 ### Module 1：V2 Schema、ID、Config 与 Policy
 
 - Pydantic domain schemas 与 TypedDict state。

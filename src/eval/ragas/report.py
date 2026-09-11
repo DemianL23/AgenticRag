@@ -21,6 +21,7 @@ class SampleReport:
     metrics: dict[str, float | None]
     metric_reasons: dict[str, str]
     evaluation_error: dict[str, str] | None
+    retrieval_trace: dict[str, Any] | None = None
 
     def to_record(self) -> dict[str, Any]:
         record = asdict(self)
@@ -50,6 +51,12 @@ class RagasReport:
     successful_samples: int
     failed_samples: int
     samples: tuple[SampleReport, ...]
+    report_name: str = "ragas"
+    run_id: str | None = None
+    git_commit: str | None = None
+    resolved_config: dict[str, Any] | None = None
+    retrieval_record: dict[str, Any] | None = None
+    retrieval_summary: dict[str, Any] | None = None
 
     def to_record(self) -> dict[str, Any]:
         return {
@@ -70,6 +77,12 @@ class RagasReport:
             "successful_samples": self.successful_samples,
             "failed_samples": self.failed_samples,
             "samples": [sample.to_record() for sample in self.samples],
+            "report_name": self.report_name,
+            "run_id": self.run_id,
+            "git_commit": self.git_commit,
+            "resolved_config": self.resolved_config,
+            "retrieval_record": self.retrieval_record,
+            "retrieval_summary": self.retrieval_summary,
         }
 
 

@@ -9,13 +9,14 @@ from collections.abc import Sequence
 from datetime import UTC, datetime
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol
 
 from agenticrag.generation.config import GenerationConfig
+from agenticrag.generation.schemas import GeneratedAnswer
 from agenticrag.generation.generator import QwenAnswerGenerator
 from agenticrag.rag.integrations.embeddings import EmbeddingConfig
 from agenticrag.rag.integrations.milvus import MilvusConfig
-from agenticrag.rag.service import RagAnswerService, RagAnswerTrace
+from agenticrag.rag.service import RagAnswerService
 from agenticrag.retrieval.milvus_retriever import MilvusRetriever
 from agenticrag.retrieval.schemas import RetrievedChunk
 
@@ -27,8 +28,13 @@ from .providers import create_ragas_evaluator
 from .report import RagasReport, SampleReport, aggregate_scores, write_report
 
 
+class AnswerTrace(Protocol):
+    answer: GeneratedAnswer
+    retrieved_chunks: Sequence[RetrievedChunk]
+
+
 class AnswerService(Protocol):
-    def answer_with_trace(self, query: str, *, k: int = 5) -> RagAnswerTrace:
+    def answer_with_trace(self, query: str, *, k: int = 5) -> AnswerTrace:
         ...
 
 
@@ -60,6 +66,11 @@ async def evaluate_end_to_end(
     evaluator_model: str,
     evaluator_embedding_model: str,
     ragas_version: str,
+    report_schema_version: int = 1,
+    report_name: str = "ragas",
+    run_id: str | None = None,
+    git_commit: str | None = None,
+    resolved_config: dict[str, Any] | None = None,
 ) -> RagasReport:
     """Materialize and evaluate each RAG sample while isolating failures."""
     _validate_positive("top_k", top_k)
@@ -72,6 +83,7 @@ async def evaluate_end_to_end(
     for index, sample in enumerate(qa_samples, start=1):
         print(f"[{index}/{len(qa_samples)}] {sample.sample_id}: RAG + RAGAS")
         blank_scores = {name: None for name in report_metric_names}
+        trace: AnswerTrace | None = None
         try:
             trace = service.answer_with_trace(sample.question, k=top_k)
             contexts = retrieved_contexts_from_chunks(trace.retrieved_chunks)
@@ -100,20 +112,31 @@ async def evaluate_end_to_end(
                     metrics=scores,
                     metric_reasons=result.reasons,
                     evaluation_error=result.errors or None,
+                    retrieval_trace=retrieval_trace_to_record(trace),
                 )
             )
         except Exception as exc:  # noqa: BLE001 - one bad sample must not stop eval
+            retrieved_chunk_ids: tuple[str, ...] = ()
+            retrieved_contexts: tuple[str, ...] = ()
+            if trace is not None:
+                retrieved_chunk_ids = tuple(
+                    chunk.chunk_id for chunk in trace.retrieved_chunks
+                )
+                retrieved_contexts = tuple(
+                    retrieved_contexts_from_chunks(trace.retrieved_chunks)
+                )
             sample_reports.append(
                 SampleReport(
                     sample_id=sample.sample_id,
                     question=sample.question,
                     reference=sample.reference,
                     generated_answer=None,
-                    retrieved_chunk_ids=(),
-                    retrieved_contexts=(),
+                    retrieved_chunk_ids=retrieved_chunk_ids,
+                    retrieved_contexts=retrieved_contexts,
                     metrics=blank_scores,
                     metric_reasons={},
                     evaluation_error={"pipeline": _format_error(exc)},
+                    retrieval_trace=retrieval_trace_to_record(trace),
                 )
             )
 
@@ -123,8 +146,13 @@ async def evaluate_end_to_end(
     failed_samples = sum(
         sample.evaluation_error is not None for sample in sample_reports
     )
+    retrieval_traces = [
+        sample.retrieval_trace
+        for sample in sample_reports
+        if sample.retrieval_trace is not None
+    ]
     return RagasReport(
-        schema_version=1,
+        schema_version=report_schema_version,
         created_at=datetime.now(UTC).isoformat(),
         dataset_path=str(Path(dataset_path)),
         dataset_size=len(sample_reports),
@@ -147,7 +175,80 @@ async def evaluate_end_to_end(
         successful_samples=len(sample_reports) - failed_samples,
         failed_samples=failed_samples,
         samples=tuple(sample_reports),
+        report_name=report_name,
+        run_id=run_id,
+        git_commit=git_commit,
+        resolved_config=resolved_config,
+        retrieval_record=_service_retrieval_record(service),
+        retrieval_summary=_retrieval_summary(retrieval_traces),
     )
+
+
+def retrieval_trace_to_record(trace: AnswerTrace | None) -> dict[str, Any] | None:
+    """Serialize optional retriever diagnostics without coupling V0 to V1.2."""
+    if trace is None:
+        return None
+    retrieval_trace = getattr(trace, "retrieval_trace", None)
+    if retrieval_trace is None:
+        return None
+
+    results = tuple(getattr(retrieval_trace, "results", ()))
+    candidate_pool = tuple(getattr(retrieval_trace, "candidate_pool", ()))
+    rrf_top20 = tuple(getattr(retrieval_trace, "rrf_top20", ()))
+    return {
+        "candidate_pool_size": len(candidate_pool),
+        "candidate_pool_chunk_ids": [chunk.chunk_id for chunk in candidate_pool],
+        "rrf_top20_size": len(rrf_top20),
+        "rrf_top20_chunk_ids": [chunk.chunk_id for chunk in rrf_top20],
+        "results": [chunk.to_record() for chunk in results],
+        "fallback_used": bool(getattr(retrieval_trace, "fallback_used", False)),
+        "fallback_reason": getattr(retrieval_trace, "fallback_reason", None),
+        "invalid_scores": bool(getattr(retrieval_trace, "invalid_scores", False)),
+        "candidate_seconds": float(getattr(retrieval_trace, "candidate_seconds", 0.0)),
+        "model_load_seconds": float(getattr(retrieval_trace, "model_load_seconds", 0.0)),
+        "rerank_seconds": float(getattr(retrieval_trace, "rerank_seconds", 0.0)),
+        "total_seconds": float(getattr(retrieval_trace, "total_seconds", 0.0)),
+    }
+
+
+def _service_retrieval_record(service: AnswerService) -> dict[str, Any] | None:
+    provider = getattr(service, "retrieval_record", None)
+    if not callable(provider):
+        return None
+    try:
+        record = provider()
+    except Exception as exc:  # noqa: BLE001 - report creation must remain available
+        return {"record_error": _format_error(exc)}
+    return record if isinstance(record, dict) else {"record_error": "not_a_mapping"}
+
+
+def _retrieval_summary(traces: Sequence[dict[str, Any]]) -> dict[str, Any] | None:
+    if not traces:
+        return None
+    fallback_reasons: dict[str, int] = {}
+    for trace in traces:
+        if trace["fallback_used"]:
+            reason = trace["fallback_reason"] or "unknown"
+            fallback_reasons[reason] = fallback_reasons.get(reason, 0) + 1
+
+    def total(name: str) -> float:
+        return sum(float(trace[name]) for trace in traces)
+
+    return {
+        "traced_queries": len(traces),
+        "retrieval_degraded_queries": sum(
+            bool(trace["fallback_used"]) for trace in traces
+        ),
+        "fallback_reason_counts": fallback_reasons,
+        "total_candidate_seconds": total("candidate_seconds"),
+        "total_model_load_seconds": total("model_load_seconds"),
+        "total_rerank_seconds": total("rerank_seconds"),
+        "total_retrieval_seconds": total("total_seconds"),
+        "mean_candidate_seconds": total("candidate_seconds") / len(traces),
+        "mean_model_load_seconds": total("model_load_seconds") / len(traces),
+        "mean_rerank_seconds": total("rerank_seconds") / len(traces),
+        "mean_retrieval_seconds": total("total_seconds") / len(traces),
+    }
 
 
 def retrieved_contexts_from_chunks(
