@@ -218,6 +218,22 @@ uv run agenticrag-search-reranker \
 `RERANK_LOCAL_FILES_ONLY=true` 验证离线复现。默认使用 CPU、batch size 8、总输入长度
 512；CUDA 和 FP16 只能通过 `RERANK_DEVICE`、`RERANK_USE_FP16` 显式开启。
 
+Query Embedding 也支持通过台式机 vLLM GPU 服务执行。默认仍为本地 CPU；设置
+`EMBEDDING_BACKEND=remote` 后，Dense query embedding 会调用配置的
+`/v1/embeddings`，并保留当前 Qwen query prompt、1024 维和 normalization 语义：
+
+```bash
+EMBEDDING_BACKEND=remote \
+EMBEDDING_REMOTE_URL=http://192.168.31.238:8002 \
+EMBEDDING_REMOTE_MODEL=Qwen/Qwen3-Embedding-0.6B \
+RERANK_BACKEND=remote \
+RERANK_REMOTE_URL=http://192.168.31.238:8001 \
+uv run agenticrag-search-reranker "中铝国际主要有哪些业务板块？"
+```
+
+远程 Embedding 失败时不会自动切回 CPU；会显式抛出错误，避免污染 backend provenance。
+切换前建议先运行 [10-query compatibility benchmark](docs/v1_2_candidate_profiling.md)。
+
 ### V1.2 Candidate Generation Profiling
 
 如需定位 candidate generation 的耗时组成，使用现有 47-query retrieval eval：

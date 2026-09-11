@@ -36,6 +36,7 @@ class MilvusRetriever(BaseRetriever):
         self.embedding_config.validate()
         self.embeddings = _TimingEmbeddings(create_embeddings(self.embedding_config))
         self.last_query_embedding_seconds = 0.0
+        self.last_embedding_request_seconds = 0.0
         self.vector_store = self._create_vector_store()
 
     def search(self, query: str, k: int = 20) -> list[RetrievedChunk]:
@@ -56,10 +57,31 @@ class MilvusRetriever(BaseRetriever):
             self.last_query_embedding_seconds = (
                 self.embeddings.last_query_embedding_seconds
             )
+            self.last_embedding_request_seconds = (
+                self.embeddings.last_request_seconds
+            )
         return [
             _to_retrieved_chunk(document, score)
             for document, score in documents_and_scores
         ]
+
+    def embedding_record(self) -> dict[str, Any]:
+        """Return safe embedding backend and compatibility metadata."""
+        record = self.embeddings.model_record()
+        record.setdefault("backend_type", self.embedding_config.backend)
+        record.setdefault("model", self.embedding_config.model_name)
+        record["dimension"] = (
+            1024 if "qwen3-embedding" in self.embedding_config.model_name.lower() else None
+        )
+        record["normalize_embeddings"] = self.embedding_config.normalize_embeddings
+        record["query_prompt_name"] = self.embedding_config.effective_query_prompt_name()
+        record["query_prompt_profile"] = (
+            "qwen3_web_search_instruction_v1"
+            if record["query_prompt_name"] == "query"
+            else None
+        )
+        record["config"] = self.embedding_config.to_record()
+        return record
 
     def _create_vector_store(self) -> Any:
         try:
@@ -112,6 +134,7 @@ class _TimingEmbeddings:
 
     def reset_query_timing(self) -> None:
         self.last_query_embedding_seconds = 0.0
+        self.last_request_seconds = 0.0
 
     def embed_query(self, text: str) -> list[float]:
         started = time.perf_counter()
@@ -119,6 +142,24 @@ class _TimingEmbeddings:
             return self._embeddings.embed_query(text)
         finally:
             self.last_query_embedding_seconds += time.perf_counter() - started
+            self.last_request_seconds = float(
+                getattr(self._embeddings, "last_request_seconds", 0.0)
+            )
 
     def embed_documents(self, texts: list[str]) -> list[list[float]]:
         return self._embeddings.embed_documents(texts)
+
+    def model_record(self) -> dict[str, Any]:
+        provider = "remote" if hasattr(self._embeddings, "remote_config") else "local"
+        record: dict[str, Any] = {
+            "backend": provider,
+            "backend_type": provider,
+            "provider": "vllm" if provider == "remote" else "langchain_huggingface",
+        }
+        if provider == "remote":
+            backend_record = self._embeddings.model_record()
+            record.update(backend_record)
+        else:
+            record["request_seconds"] = 0.0
+            record["query_prompt_name"] = None
+        return record

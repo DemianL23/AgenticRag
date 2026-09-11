@@ -258,6 +258,15 @@ def retrieval_trace_to_record(trace: AnswerTrace | None) -> dict[str, Any] | Non
         "candidate_total_seconds": float(
             getattr(retrieval_trace, "candidate_total_seconds", 0.0)
         ),
+        "embedding_backend": getattr(retrieval_trace, "embedding_backend", None),
+        "embedding_endpoint": getattr(retrieval_trace, "embedding_endpoint", None),
+        "embedding_request_seconds": float(
+            getattr(retrieval_trace, "embedding_request_seconds", 0.0)
+        ),
+        "embedding_dimension": getattr(retrieval_trace, "embedding_dimension", None),
+        "embedding_fallback_used": bool(
+            getattr(retrieval_trace, "embedding_fallback_used", False)
+        ),
         "candidate_seconds": float(getattr(retrieval_trace, "candidate_seconds", 0.0)),
         "model_load_seconds": float(getattr(retrieval_trace, "model_load_seconds", 0.0)),
         "rerank_seconds": float(getattr(retrieval_trace, "rerank_seconds", 0.0)),

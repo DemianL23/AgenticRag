@@ -2,7 +2,9 @@
 
 本 profiling 只增加 timing diagnostics，不改变 V1.2 的检索语义：Dense Top-20、BM25
 Top-20、RRF `k=60`、candidate pool 和 reranker 均保持不变。当前 query embedding
-仍使用 `Qwen/Qwen3-Embedding-0.6B` 的既有配置。
+仍使用 `Qwen/Qwen3-Embedding-0.6B` 的既有配置。当前可以通过
+`EMBEDDING_BACKEND=local|remote` 切换执行位置；切换到 remote 时，客户端仍显式复用
+本地 Qwen query prompt。
 
 ## 分阶段计时
 
@@ -62,3 +64,17 @@ benchmark 单独记录：
 
 warm latency 不包含模型加载时间。benchmark 不切换 device、不迁移模型，也不修改
 EmbeddingConfig。
+
+Remote Embedding 的兼容性检查：
+
+```bash
+EMBEDDING_BACKEND=remote \
+EMBEDDING_REMOTE_URL=http://192.168.31.238:8002 \
+uv run --extra embeddings --extra milvus agenticrag-embedding-compatibility \
+  --limit 10 \
+  --output artifacts/profiling/embedding_compatibility_10q.json
+```
+
+该检查比较 local/remote 向量的维度、norm、cosine、最大元素误差，并使用同一 L2
+Milvus collection 比较 Top-1、Top-5 和 Top-20。当前 remote embedding 不提供隐式
+CPU fallback。

@@ -39,6 +39,10 @@ def main() -> None:
 
     print(f"Top {len(trace.results)} V1.2-A reranked results:")
     print(f"candidate_pool_size: {len(trace.candidate_pool)}")
+    print(f"embedding_backend: {trace.embedding_backend}")
+    print(f"embedding_endpoint: {trace.embedding_endpoint}")
+    print(f"embedding_request_seconds: {trace.embedding_request_seconds:.6f}")
+    print(f"embedding_dimension: {trace.embedding_dimension}")
     print(f"reranker_backend: {trace.reranker_backend}")
     print(f"reranker_endpoint: {trace.reranker_endpoint}")
     print(f"rerank_request_seconds: {trace.rerank_request_seconds:.6f}")

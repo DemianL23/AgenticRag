@@ -63,6 +63,11 @@ class RerankingSearchTrace:
     bm25_search_seconds: float = 0.0
     merge_rrf_seconds: float = 0.0
     candidate_total_seconds: float = 0.0
+    embedding_backend: str | None = None
+    embedding_endpoint: str | None = None
+    embedding_request_seconds: float = 0.0
+    embedding_dimension: int | None = None
+    embedding_fallback_used: bool = False
 
 
 class RerankingRetriever(BaseRetriever):
@@ -131,6 +136,7 @@ class RerankingRetriever(BaseRetriever):
                 rerank_seconds=0.0,
                 total_seconds=time.perf_counter() - total_started,
                 **candidate_timing.to_record(),
+                **_embedding_trace_metadata(self.hybrid_retriever),
                 **metadata,
             )
 
@@ -216,11 +222,19 @@ class RerankingRetriever(BaseRetriever):
             rerank_seconds=rerank_seconds,
             total_seconds=time.perf_counter() - total_started,
             **candidate_timing.to_record(),
+            **_embedding_trace_metadata(self.hybrid_retriever),
             **metadata,
         )
 
     def model_record(self) -> dict[str, Any]:
         return self.reranker.model_record()
+
+    def embedding_record(self) -> dict[str, Any] | None:
+        provider = getattr(self.hybrid_retriever.dense_retriever, "embedding_record", None)
+        if not callable(provider):
+            return None
+        record = provider()
+        return record if isinstance(record, dict) else None
 
 
 def _validated_scores(raw_scores: Sequence[object], *, expected: int) -> list[float]:
@@ -360,3 +374,30 @@ def _candidate_pool_with_timing(
     return candidates, CandidateGenerationTiming(
         candidate_total_seconds=time.perf_counter() - started,
     )
+
+
+def _embedding_trace_metadata(hybrid_retriever: HybridRetriever) -> dict[str, Any]:
+    dense_retriever = getattr(hybrid_retriever, "dense_retriever", None)
+    record_provider = getattr(dense_retriever, "embedding_record", None)
+    record = record_provider() if callable(record_provider) else {}
+    if not isinstance(record, dict):
+        record = {}
+    endpoint = record.get("endpoint")
+    request_seconds = record.get(
+        "request_seconds",
+        getattr(dense_retriever, "last_embedding_request_seconds", 0.0),
+    )
+    try:
+        request_seconds = float(request_seconds or 0.0)
+    except (TypeError, ValueError):
+        request_seconds = 0.0
+    dimension = record.get("dimension")
+    if isinstance(dimension, bool) or not isinstance(dimension, int):
+        dimension = None
+    return {
+        "embedding_backend": record.get("backend_type", record.get("backend")),
+        "embedding_endpoint": endpoint,
+        "embedding_request_seconds": request_seconds,
+        "embedding_dimension": dimension,
+        "embedding_fallback_used": bool(record.get("fallback_used", False)),
+    }

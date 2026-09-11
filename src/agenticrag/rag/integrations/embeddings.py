@@ -15,6 +15,7 @@ from langchain_core.embeddings import Embeddings
 
 
 DEFAULT_EMBEDDING_MODEL = "Qwen/Qwen3-Embedding-0.6B"
+DEFAULT_EMBEDDING_BACKEND = "local"
 DEFAULT_EMBEDDING_DEVICE = "cpu"
 DEFAULT_EMBEDDING_BATCH_SIZE = 32
 DEFAULT_EMBEDDING_NORMALIZE = True
@@ -25,6 +26,7 @@ class EmbeddingConfig:
     """Configuration shared by document and query embedding."""
 
     model_name: str = DEFAULT_EMBEDDING_MODEL
+    backend: str = DEFAULT_EMBEDDING_BACKEND
     device: str = DEFAULT_EMBEDDING_DEVICE
     batch_size: int = DEFAULT_EMBEDDING_BATCH_SIZE
     normalize_embeddings: bool = DEFAULT_EMBEDDING_NORMALIZE
@@ -54,6 +56,7 @@ class EmbeddingConfig:
 
         config = cls(
             model_name=model_name,
+            backend=os.getenv("EMBEDDING_BACKEND", DEFAULT_EMBEDDING_BACKEND),
             device=os.getenv("EMBEDDING_DEVICE", DEFAULT_EMBEDDING_DEVICE),
             batch_size=_read_int("EMBEDDING_BATCH_SIZE", DEFAULT_EMBEDDING_BATCH_SIZE),
             normalize_embeddings=_read_bool(
@@ -69,6 +72,8 @@ class EmbeddingConfig:
     def validate(self) -> None:
         if not self.model_name.strip():
             raise ValueError("model_name 不能为空")
+        if self.backend not in {"local", "remote"}:
+            raise ValueError("backend 必须是 local 或 remote")
         if not self.device.strip():
             raise ValueError("device 不能为空")
         if self.batch_size <= 0:
@@ -111,6 +116,19 @@ def create_embeddings(config: EmbeddingConfig | None = None) -> Embeddings:
     """
     config = config or EmbeddingConfig.from_env()
     config.validate()
+    if config.backend == "remote":
+        from agenticrag.rag.integrations.remote_embeddings import (
+            RemoteEmbeddingConfig,
+            RemoteQwenEmbeddings,
+        )
+
+        return RemoteQwenEmbeddings(
+            embedding_config=config,
+            remote_config=RemoteEmbeddingConfig.from_env(
+                fallback_model=config.model_name,
+            ),
+        )
+
     try:
         from langchain_huggingface import HuggingFaceEmbeddings
     except ImportError as exc:

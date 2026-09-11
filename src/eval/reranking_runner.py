@@ -123,6 +123,11 @@ def evaluate_reranking(
                 "fallback_used": trace.fallback_used,
                 "fallback_reason": trace.fallback_reason,
                 "invalid_scores": trace.invalid_scores,
+                "embedding_backend": trace.embedding_backend,
+                "embedding_endpoint": trace.embedding_endpoint,
+                "embedding_request_seconds": trace.embedding_request_seconds,
+                "embedding_dimension": trace.embedding_dimension,
+                "embedding_fallback_used": trace.embedding_fallback_used,
                 "candidate_timing_seconds": candidate_timing,
                 "timing_seconds": {
                     "candidate": trace.candidate_seconds,
@@ -206,6 +211,7 @@ def evaluate_reranking(
             "run_total": run_seconds,
         },
         "model": retriever.model_record(),
+        "embedding": _embedding_record(retriever),
         "baseline_comparison": baseline_comparison,
         "optimization_outcome": _optimization_outcome(baseline_comparison),
         "freeze": {
@@ -338,6 +344,14 @@ def _mean_percentage(values: Sequence[float], totals: Sequence[float]) -> float:
         if total > 0.0
     ]
     return statistics.fmean(ratios) if ratios else 0.0
+
+
+def _embedding_record(retriever: RerankingRetrieverProtocol) -> dict[str, Any] | None:
+    provider = getattr(retriever, "embedding_record", None)
+    if not callable(provider):
+        return None
+    record = provider()
+    return record if isinstance(record, dict) else None
 
 
 def _baseline_comparison(

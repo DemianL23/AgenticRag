@@ -51,6 +51,7 @@ def test_embedding_config_from_env_uses_module_defaults_with_slots(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     for name in (
+        "EMBEDDING_BACKEND",
         "EMBEDDING_MODEL",
         "EMBEDDING_DEVICE",
         "EMBEDDING_BATCH_SIZE",
@@ -67,6 +68,29 @@ def test_embedding_config_from_env_uses_module_defaults_with_slots(
     assert config.device == "cpu"
     assert config.batch_size == 32
     assert config.normalize_embeddings is True
+
+
+def test_embedding_config_from_env_selects_remote_backend(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / ".env").write_text(
+        "EMBEDDING_BACKEND=remote\n"
+        "EMBEDDING_REMOTE_URL=http://embedding.test:8002\n"
+        "EMBEDDING_REMOTE_MODEL=Qwen/Qwen3-Embedding-0.6B\n",
+        encoding="utf-8",
+    )
+    for name in (
+        "EMBEDDING_BACKEND",
+        "EMBEDDING_REMOTE_URL",
+        "EMBEDDING_REMOTE_MODEL",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("EMBEDDING_MODEL", "Qwen/Qwen3-Embedding-0.6B")
+
+    config = EmbeddingConfig.from_env(tmp_path / ".env")
+
+    assert config.backend == "remote"
+    assert config.model_name == "Qwen/Qwen3-Embedding-0.6B"
 
 
 def test_embedding_config_rejects_invalid_batch_size() -> None:
