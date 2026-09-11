@@ -140,6 +140,8 @@ async def evaluate_end_to_end(
                 task_type=sample.task_type,
             )
         except Exception as exc:  # noqa: BLE001 - numeric score is diagnostic only
+            evaluation_errors = dict(result.errors)
+            evaluation_errors[NUMERIC_CORRECTNESS] = _format_error(exc)
             sample_reports.append(
                 SampleReport(
                     sample_id=sample.sample_id,
@@ -150,9 +152,9 @@ async def evaluate_end_to_end(
                         chunk.chunk_id for chunk in trace.retrieved_chunks
                     ),
                     retrieved_contexts=tuple(contexts),
-                    metrics={**blank_scores, NUMERIC_CORRECTNESS: None},
+                    metrics={**result.scores, NUMERIC_CORRECTNESS: None},
                     metric_reasons=result.reasons,
-                    evaluation_error={"numeric_correctness": _format_error(exc)},
+                    evaluation_error=evaluation_errors,
                     retrieval_trace=retrieval_trace_to_record(trace),
                 )
             )

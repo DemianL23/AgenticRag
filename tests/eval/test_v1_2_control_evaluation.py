@@ -7,6 +7,7 @@ from agenticrag.generation.schemas import GeneratedAnswer
 from agenticrag.retrieval.reranking_retriever import RerankingSearchTrace
 from agenticrag.retrieval.schemas import HybridRetrievedChunk, RerankedChunk
 from eval.ragas.evaluator import RagasMetricResult
+from eval.ragas import runner as ragas_runner
 from eval.ragas.runner import evaluate_end_to_end
 
 
@@ -86,6 +87,17 @@ class RaisingEvaluator:
 
     async def evaluate(self, **kwargs: object) -> RagasMetricResult:
         raise RuntimeError("judge unavailable")
+
+
+class PartiallyScoredEvaluator:
+    metric_names = ("faithfulness", "answer_correctness")
+
+    async def evaluate(self, **kwargs: object) -> RagasMetricResult:
+        return RagasMetricResult(
+            scores={"faithfulness": 1.0, "answer_correctness": None},
+            reasons={"faithfulness": "supported"},
+            errors={"answer_correctness": "judge metric failed"},
+        )
 
 
 def test_control_report_contains_v12_trace_and_aggregate_diagnostics(
@@ -208,4 +220,49 @@ def test_control_report_counts_reranker_fallbacks(tmp_path: Path) -> None:
     assert report.retrieval_summary["retrieval_degraded_queries"] == 1
     assert report.retrieval_summary["fallback_reason_counts"] == {
         "inference_error": 1
+    }
+
+
+def test_numeric_failure_keeps_ragas_scores_and_merges_errors(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    dataset = tmp_path / "qa.jsonl"
+    dataset.write_text(
+        json.dumps({"id": "q1", "question": "问题", "gold": "答案"}) + "\n",
+        encoding="utf-8",
+    )
+
+    def raise_numeric_error(*args: object, **kwargs: object) -> float | None:
+        raise RuntimeError("numeric parser failed")
+
+    monkeypatch.setattr(ragas_runner, "numeric_correctness", raise_numeric_error)
+    report = asyncio.run(
+        evaluate_end_to_end(
+            dataset,
+            FakeControlService(_trace()),  # type: ignore[arg-type]
+            PartiallyScoredEvaluator(),
+            top_k=5,
+            limit=None,
+            generation_model="qwen-plus",
+            embedding_model="qwen-embedding",
+            evaluator_model="qwen-max",
+            evaluator_embedding_model="qwen-embedding",
+            ragas_version="0.4.3",
+        )
+    )
+
+    sample = report.samples[0]
+    assert sample.generated_answer == "control answer"
+    assert sample.retrieved_contexts == ("control evidence",)
+    assert sample.retrieval_trace is not None
+    assert sample.metrics == {
+        "faithfulness": 1.0,
+        "answer_correctness": None,
+        "numeric_correctness": None,
+    }
+    assert sample.metric_reasons == {"faithfulness": "supported"}
+    assert sample.evaluation_error == {
+        "answer_correctness": "judge metric failed",
+        "numeric_correctness": "RuntimeError: numeric parser failed",
     }
