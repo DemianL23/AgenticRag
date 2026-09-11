@@ -15,7 +15,7 @@ from langchain_core.embeddings import Embeddings
 
 
 DEFAULT_EMBEDDING_MODEL = "Qwen/Qwen3-Embedding-0.6B"
-DEFAULT_EMBEDDING_BACKEND = "local"
+DEFAULT_EMBEDDING_BACKEND = "remote"
 DEFAULT_EMBEDDING_DEVICE = "cpu"
 DEFAULT_EMBEDDING_BATCH_SIZE = 32
 DEFAULT_EMBEDDING_NORMALIZE = True
@@ -104,6 +104,12 @@ class EmbeddingConfig:
         record = asdict(self)
         record["model_kwargs"] = self.model_kwargs or {}
         record["query_prompt_name"] = self.effective_query_prompt_name()
+        record["document_prompt_profile"] = "raw_document_v1"
+        record["query_prompt_profile"] = (
+            "qwen3_web_search_instruction_v1"
+            if record["query_prompt_name"] == "query"
+            else None
+        )
         return record
 
 

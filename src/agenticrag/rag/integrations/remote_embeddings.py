@@ -20,6 +20,8 @@ from agenticrag.rag.integrations.embeddings import EmbeddingConfig
 DEFAULT_REMOTE_EMBEDDING_TIMEOUT_SECONDS = 30.0
 DEFAULT_REMOTE_EMBEDDING_DIMENSION = 1024
 DEFAULT_REMOTE_MAX_MODEL_LEN = 4096
+DEFAULT_REMOTE_EMBEDDING_BATCH_SIZE = 32
+DOCUMENT_PROMPT_PROFILE = "raw_document_v1"
 QWEN3_QUERY_PROMPT = (
     "Instruct: Given a web search query, retrieve relevant passages that answer the query\n"
     "Query:"
@@ -39,6 +41,7 @@ class RemoteEmbeddingConfig:
     timeout_seconds: float = DEFAULT_REMOTE_EMBEDDING_TIMEOUT_SECONDS
     expected_dimension: int = DEFAULT_REMOTE_EMBEDDING_DIMENSION
     max_model_len: int = DEFAULT_REMOTE_MAX_MODEL_LEN
+    batch_size: int = DEFAULT_REMOTE_EMBEDDING_BATCH_SIZE
     model_revision: str | None = None
 
     @classmethod
@@ -57,6 +60,10 @@ class RemoteEmbeddingConfig:
             max_model_len=_read_int(
                 "EMBEDDING_REMOTE_MAX_MODEL_LEN",
                 DEFAULT_REMOTE_MAX_MODEL_LEN,
+            ),
+            batch_size=_read_int(
+                "EMBEDDING_REMOTE_BATCH_SIZE",
+                DEFAULT_REMOTE_EMBEDDING_BATCH_SIZE,
             ),
             model_revision=_read_optional("EMBEDDING_REMOTE_MODEL_REVISION"),
         )
@@ -79,6 +86,8 @@ class RemoteEmbeddingConfig:
             raise ValueError("EMBEDDING_REMOTE_DIMENSION 必须是正整数")
         if self.max_model_len <= 0:
             raise ValueError("EMBEDDING_REMOTE_MAX_MODEL_LEN 必须是正整数")
+        if self.batch_size <= 0:
+            raise ValueError("EMBEDDING_REMOTE_BATCH_SIZE 必须是正整数")
 
     def to_record(self) -> dict[str, Any]:
         record = asdict(self)
@@ -106,6 +115,7 @@ class RemoteQwenEmbeddings(Embeddings):
         self.remote_config = remote_config
         self.last_request_seconds = 0.0
         self._last_error: str | None = None
+        self._tokenizer: Any | None = None
 
     def embed_query(self, text: str) -> list[float]:
         """Embed one query with the same Qwen query prompt as local SentenceTransformer."""
@@ -124,7 +134,19 @@ class RemoteQwenEmbeddings(Embeddings):
         if any(not isinstance(text, str) or not text.strip() for text in texts):
             raise ValueError("texts 中每个 document 都必须是非空字符串")
         prepared = [text.replace("\n", " ") for text in texts]
-        return self._embed(prepared)
+        self._validate_document_lengths(prepared)
+        vectors: list[list[float]] = []
+        for start in range(0, len(prepared), self.remote_config.batch_size):
+            vectors.extend(self._embed(prepared[start : start + self.remote_config.batch_size]))
+        return vectors
+
+    def document_token_lengths(self, texts: list[str]) -> list[int]:
+        """Return token lengths after the same preprocessing sent to vLLM."""
+        if not isinstance(texts, list):
+            raise TypeError("texts 必须是 list[str]")
+        if any(not isinstance(text, str) or not text.strip() for text in texts):
+            raise ValueError("texts 中每个 document 都必须是非空字符串")
+        return self._token_lengths([text.replace("\n", " ") for text in texts])
 
     def model_record(self) -> dict[str, Any]:
         """Return safe backend and compatibility metadata for reports."""
@@ -136,6 +158,7 @@ class RemoteQwenEmbeddings(Embeddings):
             "endpoint": self.remote_config.endpoint,
             "model": self.remote_config.model,
             "model_revision": self.remote_config.model_revision,
+            "revision_verified": self.remote_config.model_revision is not None,
             "dimension": self.remote_config.expected_dimension,
             "normalize_embeddings": self.embedding_config.normalize_embeddings,
             "normalization": "unit_norm_with_client_guard",
@@ -144,6 +167,8 @@ class RemoteQwenEmbeddings(Embeddings):
             "query_prompt": QWEN3_QUERY_PROMPT,
             "max_model_len": self.remote_config.max_model_len,
             "effective_max_length": self.remote_config.max_model_len,
+            "batch_size": self.remote_config.batch_size,
+            "document_prompt_profile": DOCUMENT_PROMPT_PROFILE,
             "timeout_seconds": self.remote_config.timeout_seconds,
             "request_seconds": self.last_request_seconds,
             "last_error": self._last_error,
@@ -173,6 +198,45 @@ class RemoteQwenEmbeddings(Embeddings):
             expected_dimension=self.remote_config.expected_dimension,
         )
         return [self._normalize_if_needed(vector) for vector in vectors]
+
+    def _validate_document_lengths(self, texts: list[str]) -> None:
+        lengths = self._token_lengths(texts)
+        over_limit = [
+            (index, length)
+            for index, length in enumerate(lengths)
+            if length > self.remote_config.max_model_len
+        ]
+        if over_limit:
+            raise RemoteEmbeddingError(
+                "document 超过 remote max_model_len，拒绝 silent truncation："
+                f"limit={self.remote_config.max_model_len}, over_limit={over_limit[:5]}"
+            )
+
+    def _token_lengths(self, texts: list[str]) -> list[int]:
+        try:
+            from transformers import AutoTokenizer
+        except ImportError as exc:  # pragma: no cover - optional dependency
+            raise RemoteEmbeddingError(
+                "文档长度保护需要 transformers，请执行：uv sync --extra embeddings"
+            ) from exc
+
+        if self._tokenizer is None:
+            self._tokenizer = _get_tokenizer(
+                self.remote_config.model,
+                self.remote_config.model_revision,
+            )
+        tokenizer = self._tokenizer
+        encoded = tokenizer(
+            texts,
+            add_special_tokens=True,
+            truncation=False,
+            padding=False,
+            return_length=True,
+        )
+        lengths = encoded.get("length")
+        if not isinstance(lengths, list) or len(lengths) != len(texts):
+            raise RemoteEmbeddingError("无法获得完整 document token length")
+        return [int(length) for length in lengths]
 
     def _normalize_if_needed(self, vector: list[float]) -> list[float]:
         if not self.embedding_config.normalize_embeddings:
@@ -294,3 +358,21 @@ def _read_float(name: str, default: float) -> float:
         return float(value)
     except ValueError as exc:
         raise ValueError(f"{name} 必须是数字") from exc
+
+
+_TOKENIZER_CACHE: dict[tuple[str, str | None], Any] = {}
+
+
+def _get_tokenizer(model: str, revision: str | None) -> Any:
+    key = (model, revision)
+    tokenizer = _TOKENIZER_CACHE.get(key)
+    if tokenizer is not None:
+        return tokenizer
+    try:
+        from transformers import AutoTokenizer
+
+        tokenizer = AutoTokenizer.from_pretrained(model, revision=revision)
+    except Exception as exc:  # noqa: BLE001 - fail closed for length safety
+        raise RemoteEmbeddingError(f"无法加载 document tokenizer：{exc}") from exc
+    _TOKENIZER_CACHE[key] = tokenizer
+    return tokenizer

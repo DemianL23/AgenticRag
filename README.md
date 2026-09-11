@@ -141,7 +141,15 @@ Milvus Python 集成放在可选依赖中：
 uv sync --extra milvus --extra embeddings
 ```
 
-索引命令会读取 chunk JSONL，使用 `.env` 中的 Embedding 模型生成向量，并写入按模型和切块配置生成的 collection：
+索引命令会读取 chunk JSONL，使用 `.env` 中的 Embedding backend 生成向量，并写入按模型和切块配置生成的 collection。当前推荐使用 remote；正式重建前先运行 20-chunk 兼容性检查：
+
+```bash
+uv run --extra embeddings agenticrag-document-embedding-compatibility \
+  --chunks-dir artifacts/chunks/pymupdf/v0 \
+  --sample-size 20
+```
+
+兼容性通过后，才执行索引：
 
 ```bash
 uv run agenticrag-index-milvus \
@@ -150,6 +158,15 @@ uv run agenticrag-index-milvus \
 ```
 
 `--drop-old` 只在明确需要重建同名 collection 时使用。默认不删除已有数据。索引报告会写到 `artifacts/chunks/pymupdf/v0/milvus_report.json`，包含 collection 名称、向量维度、Embedding 配置和写入 chunk 数量。
+写入已有 collection 前会比较模型、revision、维度、normalization 和 prompt profile；无法验证或不兼容时拒绝混写。远程 document embedding 使用 batch size 32，并对超过远程 `max_model_len=4096` 的 chunk fail-fast。
+
+文档 embedding 性能对比：
+
+```bash
+uv run --extra embeddings agenticrag-benchmark-document-embedding \
+  --chunks-dir artifacts/chunks/pymupdf/v0 \
+  --sample-size 100
+```
 
 ### V1.1 BM25 collection
 
@@ -218,8 +235,8 @@ uv run agenticrag-search-reranker \
 `RERANK_LOCAL_FILES_ONLY=true` 验证离线复现。默认使用 CPU、batch size 8、总输入长度
 512；CUDA 和 FP16 只能通过 `RERANK_DEVICE`、`RERANK_USE_FP16` 显式开启。
 
-Query Embedding 也支持通过台式机 vLLM GPU 服务执行。默认仍为本地 CPU；设置
-`EMBEDDING_BACKEND=remote` 后，Dense query embedding 会调用配置的
+Query 和 Document Embedding 推荐通过台式机 vLLM GPU 服务执行。当前默认 backend 为
+`remote`；设置 `EMBEDDING_BACKEND=local` 可切回本地 CPU。远程 backend 调用配置的
 `/v1/embeddings`，并保留当前 Qwen query prompt、1024 维和 normalization 语义：
 
 ```bash

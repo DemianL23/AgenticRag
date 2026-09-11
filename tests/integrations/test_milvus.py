@@ -3,6 +3,7 @@ import sys
 import types
 from pathlib import Path
 
+import pytest
 from langchain_core.documents import Document
 
 from agenticrag.ingestion.index_milvus import build_milvus_index, default_collection_name
@@ -77,6 +78,7 @@ def test_build_milvus_index_passes_stable_ids_and_schema_settings(
 
     monkeypatch.setattr("agenticrag.ingestion.index_milvus.create_embeddings", lambda _: FakeEmbeddings())
     monkeypatch.setattr("agenticrag.ingestion.index_milvus.embedding_dimension", lambda _: 3)
+    monkeypatch.setattr("agenticrag.ingestion.index_milvus._collection_exists", lambda *_: False)
     fake_module = types.ModuleType("langchain_milvus")
     fake_module.Milvus = FakeMilvus  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "langchain_milvus", fake_module)
@@ -92,5 +94,52 @@ def test_build_milvus_index_passes_stable_ids_and_schema_settings(
     assert milvus_calls["connection_args"] == {"uri": "http://localhost:19530"}
     assert milvus_calls["drop_old"] is False
     assert report["embedding"]["dimension"] == 3
+    assert report["embedding"]["document_prompt_profile"] == "raw_document_v1"
+    assert report["embedding"]["embedding_dimension"] == 3
     assert report["chunks"] == 2
     assert (chunks_dir / "milvus_report.json").is_file()
+
+
+def test_build_milvus_index_rejects_incompatible_existing_collection(
+    tmp_path: Path, monkeypatch
+) -> None:
+    chunks_dir = tmp_path / "chunks"
+    chunks_dir.mkdir()
+    (chunks_dir / "doc_001.jsonl").write_text(
+        json.dumps(
+            {
+                "page_content": "Revenue increased.",
+                "metadata": {"chunk_id": "doc_001:p0001:c000"},
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (chunks_dir / "milvus_report.json").write_text(
+        json.dumps(
+            {
+                "embedding": {
+                    "model_name": "Qwen/Qwen3-Embedding-0.6B",
+                    "dimension": 768,
+                    "normalize_embeddings": True,
+                    "query_prompt_name": "query",
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    class FakeEmbeddings:
+        def embed_query(self, text: str) -> list[float]:
+            return [0.1, 0.2, 0.3]
+
+    monkeypatch.setattr("agenticrag.ingestion.index_milvus.create_embeddings", lambda _: FakeEmbeddings())
+    monkeypatch.setattr("agenticrag.ingestion.index_milvus.embedding_dimension", lambda _: 3)
+    monkeypatch.setattr("agenticrag.ingestion.index_milvus._collection_exists", lambda *_: True)
+
+    with pytest.raises(ValueError, match="不兼容"):
+        build_milvus_index(
+            chunks_dir,
+            milvus_config=MilvusConfig(collection_name="demo"),
+            embedding_config=EmbeddingConfig(backend="local"),
+        )

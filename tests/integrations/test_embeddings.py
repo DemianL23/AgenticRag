@@ -15,6 +15,7 @@ def test_embedding_config_defaults_to_qwen_and_adds_query_prompt() -> None:
     config = EmbeddingConfig()
 
     assert config.model_name == "Qwen/Qwen3-Embedding-0.6B"
+    assert config.backend == "remote"
     assert config.device == "cpu"
     assert config.resolved_model_kwargs() == {"device": "cpu"}
     assert config.resolved_document_encode_kwargs() == {
@@ -65,6 +66,7 @@ def test_embedding_config_from_env_uses_module_defaults_with_slots(
     config = EmbeddingConfig.from_env(tmp_path / "missing.env")
 
     assert config.model_name == "Qwen/Qwen3-Embedding-0.6B"
+    assert config.backend == "remote"
     assert config.device == "cpu"
     assert config.batch_size == 32
     assert config.normalize_embeddings is True
@@ -116,7 +118,7 @@ def test_create_embeddings_passes_document_and_query_settings(monkeypatch: pytes
     fake_module.HuggingFaceEmbeddings = FakeEmbeddings  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "langchain_huggingface", fake_module)
 
-    embeddings = create_embeddings(EmbeddingConfig(batch_size=8))
+    embeddings = create_embeddings(EmbeddingConfig(backend="local", batch_size=8))
 
     assert calls == {
         "model_name": "Qwen/Qwen3-Embedding-0.6B",

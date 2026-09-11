@@ -47,10 +47,68 @@ class FakeResponse:
 
 
 def _embedding_client() -> RemoteQwenEmbeddings:
-    return RemoteQwenEmbeddings(
+    client = RemoteQwenEmbeddings(
         embedding_config=EmbeddingConfig(backend="remote"),
         remote_config=_config(),
     )
+    client._tokenizer = lambda texts, **_: {"length": [len(text) for text in texts]}
+    return client
+
+
+def test_remote_documents_use_configured_batches_and_raw_prompt(monkeypatch) -> None:
+    payloads: list[dict[str, object]] = []
+
+    def fake_urlopen(request: object, **_kwargs) -> FakeResponse:
+        payload = json.loads(request.data)  # type: ignore[attr-defined]
+        payloads.append(payload)
+        return FakeResponse(
+            {
+                "data": [
+                    {"index": index, "embedding": _unit_vector(float(index + 1))}
+                    for index in range(len(payload["input"]))
+                ]
+            }
+        )
+
+    client = RemoteQwenEmbeddings(
+        embedding_config=EmbeddingConfig(backend="remote"),
+        remote_config=RemoteEmbeddingConfig(
+            url="http://embedding.test:8002",
+            model="Qwen/Qwen3-Embedding-0.6B",
+            batch_size=2,
+        ),
+    )
+    client._tokenizer = lambda texts, **_: {"length": [len(text) for text in texts]}
+    monkeypatch.setattr(
+        "agenticrag.rag.integrations.remote_embeddings.urlopen", fake_urlopen
+    )
+
+    result = client.embed_documents(["doc\nA", "doc B", "doc C"])
+
+    assert [payload["input"] for payload in payloads] == [
+        ["doc A", "doc B"],
+        ["doc C"],
+    ]
+    assert len(result) == 3
+
+
+def test_remote_documents_fail_fast_when_over_max_model_len(monkeypatch) -> None:
+    client = RemoteQwenEmbeddings(
+        embedding_config=EmbeddingConfig(backend="remote"),
+        remote_config=RemoteEmbeddingConfig(
+            url="http://embedding.test:8002",
+            model="Qwen/Qwen3-Embedding-0.6B",
+            max_model_len=2,
+        ),
+    )
+    client._tokenizer = lambda texts, **_: {"length": [3 for _ in texts]}
+    monkeypatch.setattr(
+        "agenticrag.rag.integrations.remote_embeddings.urlopen",
+        lambda *_args, **_kwargs: pytest.fail("over-length document must not call HTTP"),
+    )
+
+    with pytest.raises(RemoteEmbeddingError, match="max_model_len"):
+        client.embed_documents(["too long"])
 
 
 def test_remote_query_sends_prompt_and_validates_dimension(
