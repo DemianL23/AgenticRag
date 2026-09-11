@@ -243,6 +243,21 @@ def retrieval_trace_to_record(trace: AnswerTrace | None) -> dict[str, Any] | Non
         "fallback_used": bool(getattr(retrieval_trace, "fallback_used", False)),
         "fallback_reason": getattr(retrieval_trace, "fallback_reason", None),
         "invalid_scores": bool(getattr(retrieval_trace, "invalid_scores", False)),
+        "query_embedding_seconds": float(
+            getattr(retrieval_trace, "query_embedding_seconds", 0.0)
+        ),
+        "dense_search_seconds": float(
+            getattr(retrieval_trace, "dense_search_seconds", 0.0)
+        ),
+        "bm25_search_seconds": float(
+            getattr(retrieval_trace, "bm25_search_seconds", 0.0)
+        ),
+        "merge_rrf_seconds": float(
+            getattr(retrieval_trace, "merge_rrf_seconds", 0.0)
+        ),
+        "candidate_total_seconds": float(
+            getattr(retrieval_trace, "candidate_total_seconds", 0.0)
+        ),
         "candidate_seconds": float(getattr(retrieval_trace, "candidate_seconds", 0.0)),
         "model_load_seconds": float(getattr(retrieval_trace, "model_load_seconds", 0.0)),
         "rerank_seconds": float(getattr(retrieval_trace, "rerank_seconds", 0.0)),

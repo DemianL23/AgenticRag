@@ -110,6 +110,45 @@ def test_milvus_retriever_requires_collection_name(
         )
 
 
+def test_milvus_retriever_records_query_embedding_time(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeEmbeddings:
+        def embed_query(self, query: str) -> list[float]:
+            assert query == "问题"
+            return [0.1, 0.2]
+
+        def embed_documents(self, texts: list[str]) -> list[list[float]]:
+            return [[0.1, 0.2] for _ in texts]
+
+    class FakeVectorStore:
+        def __init__(self, **kwargs: object) -> None:
+            self.embedding_function = kwargs["embedding_function"]
+
+        def similarity_search_with_score(
+            self, query: str, *, k: int
+        ) -> list[tuple[Document, float]]:
+            self.embedding_function.embed_query(query)  # type: ignore[attr-defined]
+            return []
+
+    fake_module = types.ModuleType("langchain_milvus")
+    fake_module.Milvus = FakeVectorStore  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "langchain_milvus", fake_module)
+    monkeypatch.setattr(
+        "agenticrag.retrieval.milvus_retriever.create_embeddings",
+        lambda _: FakeEmbeddings(),
+    )
+
+    retriever = MilvusRetriever(
+        milvus_config=MilvusConfig(collection_name="demo"),
+        embedding_config=EmbeddingConfig(),
+    )
+
+    retriever.search("问题", k=2)
+
+    assert retriever.last_query_embedding_seconds > 0.0
+
+
 def test_milvus_retriever_validates_query_and_k(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -21,6 +21,7 @@ from agenticrag.retrieval.hybrid_retriever import (
     HybridRetriever,
 )
 from agenticrag.retrieval.schemas import (
+    CandidateGenerationTiming,
     HybridRetrievedChunk,
     RerankedChunk,
 )
@@ -57,6 +58,11 @@ class RerankingSearchTrace:
     reranker_endpoint: str | None = None
     rerank_request_seconds: float = 0.0
     rerank_candidate_count: int = 0
+    query_embedding_seconds: float = 0.0
+    dense_search_seconds: float = 0.0
+    bm25_search_seconds: float = 0.0
+    merge_rrf_seconds: float = 0.0
+    candidate_total_seconds: float = 0.0
 
 
 class RerankingRetriever(BaseRetriever):
@@ -99,7 +105,8 @@ class RerankingRetriever(BaseRetriever):
 
         total_started = time.perf_counter()
         candidate_started = time.perf_counter()
-        candidate_pool = self.hybrid_retriever.candidate_pool(
+        candidate_pool, candidate_timing = _candidate_pool_with_timing(
+            self.hybrid_retriever,
             clean_query,
             route_k=self.route_k,
         )
@@ -123,6 +130,7 @@ class RerankingRetriever(BaseRetriever):
                 model_load_seconds=0.0,
                 rerank_seconds=0.0,
                 total_seconds=time.perf_counter() - total_started,
+                **candidate_timing.to_record(),
                 **metadata,
             )
 
@@ -207,6 +215,7 @@ class RerankingRetriever(BaseRetriever):
             model_load_seconds=model_load_seconds,
             rerank_seconds=rerank_seconds,
             total_seconds=time.perf_counter() - total_started,
+            **candidate_timing.to_record(),
             **metadata,
         )
 
@@ -333,3 +342,21 @@ def _reranker_trace_metadata(
         "rerank_request_seconds": request_seconds,
         "rerank_candidate_count": int(record.get("candidate_count", candidate_count)),
     }
+
+
+def _candidate_pool_with_timing(
+    hybrid_retriever: HybridRetriever,
+    query: str,
+    *,
+    route_k: int,
+) -> tuple[list[HybridRetrievedChunk], CandidateGenerationTiming]:
+    """Use the diagnostic API while keeping compatibility with test doubles."""
+    timed_search = getattr(hybrid_retriever, "candidate_pool_with_timing", None)
+    if callable(timed_search):
+        return timed_search(query, route_k=route_k)
+
+    started = time.perf_counter()
+    candidates = hybrid_retriever.candidate_pool(query, route_k=route_k)
+    return candidates, CandidateGenerationTiming(
+        candidate_total_seconds=time.perf_counter() - started,
+    )

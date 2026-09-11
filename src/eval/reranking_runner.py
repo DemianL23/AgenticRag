@@ -59,6 +59,16 @@ def evaluate_reranking(
     rerank_seconds: list[float] = []
     total_seconds: list[float] = []
     warm_total_seconds: list[float] = []
+    candidate_timing_values: dict[str, list[float]] = {
+        name: []
+        for name in (
+            "query_embedding_seconds",
+            "dense_search_seconds",
+            "bm25_search_seconds",
+            "merge_rrf_seconds",
+            "candidate_total_seconds",
+        )
+    }
 
     for sample in samples:
         trace = retriever.search_with_trace(sample["query"], k=final_k)
@@ -79,6 +89,9 @@ def evaluate_reranking(
         rerank_seconds.append(trace.rerank_seconds)
         total_seconds.append(trace.total_seconds)
         warm_total_seconds.append(trace.total_seconds - trace.model_load_seconds)
+        candidate_timing = _candidate_timing_record(trace)
+        for name, value in candidate_timing.items():
+            candidate_timing_values[name].append(value)
 
         query_reports.append(
             {
@@ -110,8 +123,10 @@ def evaluate_reranking(
                 "fallback_used": trace.fallback_used,
                 "fallback_reason": trace.fallback_reason,
                 "invalid_scores": trace.invalid_scores,
+                "candidate_timing_seconds": candidate_timing,
                 "timing_seconds": {
                     "candidate": trace.candidate_seconds,
+                    **candidate_timing,
                     "model_load": trace.model_load_seconds,
                     "rerank_inference": trace.rerank_seconds,
                     "end_to_end": trace.total_seconds,
@@ -178,6 +193,7 @@ def evaluate_reranking(
         "final_metrics": final_metrics,
         "rrf_candidate_metrics": rrf_candidate_metrics,
         "union_pool_metrics": union_pool_metrics,
+        "candidate_profiling": _candidate_profiling_summary(candidate_timing_values),
         "fallback_queries": fallback_queries,
         "invalid_score_queries": invalid_score_queries,
         "fallback_reasons": dict(sorted(fallback_reasons.items())),
@@ -280,6 +296,48 @@ def _final_result_record(result: RerankedChunk) -> dict[str, Any]:
         "fallback_used": result.fallback_used,
         "fallback_reason": result.fallback_reason,
     }
+
+
+def _candidate_timing_record(trace: RerankingSearchTrace) -> dict[str, float]:
+    """Read the stable candidate-generation timing fields from one trace."""
+    return {
+        name: float(getattr(trace, name, 0.0))
+        for name in (
+            "query_embedding_seconds",
+            "dense_search_seconds",
+            "bm25_search_seconds",
+            "merge_rrf_seconds",
+            "candidate_total_seconds",
+        )
+    }
+
+
+def _candidate_profiling_summary(
+    values: dict[str, Sequence[float]],
+) -> dict[str, Any]:
+    """Aggregate candidate stages and mean per-query time percentages."""
+    summaries = {name: _latency_summary(stage_values) for name, stage_values in values.items()}
+    totals = values["candidate_total_seconds"]
+    percentages = {
+        name: _mean_percentage(stage_values, totals)
+        for name, stage_values in values.items()
+        if name != "candidate_total_seconds"
+    }
+    return {
+        "stages": summaries,
+        "average_percentage_of_candidate_total": percentages,
+    }
+
+
+def _mean_percentage(values: Sequence[float], totals: Sequence[float]) -> float:
+    if not values:
+        return 0.0
+    ratios = [
+        value / total * 100.0
+        for value, total in zip(values, totals, strict=True)
+        if total > 0.0
+    ]
+    return statistics.fmean(ratios) if ratios else 0.0
 
 
 def _baseline_comparison(

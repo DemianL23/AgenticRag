@@ -33,6 +33,27 @@ class HybridRetrievedChunk(RetrievedChunk):
 
 
 @dataclass(frozen=True, slots=True)
+class CandidateGenerationTiming:
+    """Wall-clock timing for one Dense + BM25 + RRF candidate generation."""
+
+    query_embedding_seconds: float = 0.0
+    dense_search_seconds: float = 0.0
+    bm25_search_seconds: float = 0.0
+    merge_rrf_seconds: float = 0.0
+    candidate_total_seconds: float = 0.0
+
+    def to_record(self) -> dict[str, float]:
+        """Return the stable JSON report shape for profiling diagnostics."""
+        return {
+            "query_embedding_seconds": self.query_embedding_seconds,
+            "dense_search_seconds": self.dense_search_seconds,
+            "bm25_search_seconds": self.bm25_search_seconds,
+            "merge_rrf_seconds": self.merge_rrf_seconds,
+            "candidate_total_seconds": self.candidate_total_seconds,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class RerankedChunk(HybridRetrievedChunk):
     """One final V1.2 chunk with both initial and final ranking evidence."""
 

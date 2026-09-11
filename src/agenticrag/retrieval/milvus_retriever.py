@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from typing import Any
 
 from agenticrag.rag.integrations.embeddings import EmbeddingConfig, create_embeddings
@@ -33,7 +34,8 @@ class MilvusRetriever(BaseRetriever):
 
         self.embedding_config = embedding_config or EmbeddingConfig.from_env()
         self.embedding_config.validate()
-        self.embeddings = create_embeddings(self.embedding_config)
+        self.embeddings = _TimingEmbeddings(create_embeddings(self.embedding_config))
+        self.last_query_embedding_seconds = 0.0
         self.vector_store = self._create_vector_store()
 
     def search(self, query: str, k: int = 20) -> list[RetrievedChunk]:
@@ -44,10 +46,16 @@ class MilvusRetriever(BaseRetriever):
         if k <= 0:
             raise ValueError("k 必须大于 0")
 
-        documents_and_scores = self.vector_store.similarity_search_with_score(
-            clean_query,
-            k=k,
-        )
+        self.embeddings.reset_query_timing()
+        try:
+            documents_and_scores = self.vector_store.similarity_search_with_score(
+                clean_query,
+                k=k,
+            )
+        finally:
+            self.last_query_embedding_seconds = (
+                self.embeddings.last_query_embedding_seconds
+            )
         return [
             _to_retrieved_chunk(document, score)
             for document, score in documents_and_scores
@@ -93,3 +101,24 @@ def _positive_int(value: object, field_name: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
         raise ValueError(f"Milvus 返回结果缺少合法 {field_name}")
     return value
+
+
+class _TimingEmbeddings:
+    """Transparent embedding proxy that records query encode wall time."""
+
+    def __init__(self, embeddings: Any) -> None:
+        self._embeddings = embeddings
+        self.last_query_embedding_seconds = 0.0
+
+    def reset_query_timing(self) -> None:
+        self.last_query_embedding_seconds = 0.0
+
+    def embed_query(self, text: str) -> list[float]:
+        started = time.perf_counter()
+        try:
+            return self._embeddings.embed_query(text)
+        finally:
+            self.last_query_embedding_seconds += time.perf_counter() - started
+
+    def embed_documents(self, texts: list[str]) -> list[list[float]]:
+        return self._embeddings.embed_documents(texts)

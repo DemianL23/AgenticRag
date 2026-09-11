@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -151,3 +152,50 @@ def test_reranking_report_separates_all_three_metric_stages(tmp_path: Path) -> N
     assert report["fallback_queries"] == 0
     assert report["freeze"]["eligible"] is False
     assert report["queries"][0]["final_results"][0]["rrf_rank"] == 2
+
+
+def test_reranking_report_contains_candidate_generation_profiling(
+    tmp_path: Path,
+) -> None:
+    dataset = tmp_path / "dataset.jsonl"
+    _write_dataset(dataset)
+    pool = [_candidate("gold1", 1)]
+    trace = _trace(pool, [_final(pool[0], 1, 3.0)])
+
+    report = evaluate_reranking(
+        dataset,
+        FakeRerankingRetriever(
+            [
+                replace(
+                    trace,
+                    query_embedding_seconds=0.1,
+                    dense_search_seconds=0.2,
+                    bm25_search_seconds=0.3,
+                    merge_rrf_seconds=0.05,
+                    candidate_total_seconds=0.7,
+                ),
+                replace(
+                    trace,
+                    query_embedding_seconds=0.2,
+                    dense_search_seconds=0.3,
+                    bm25_search_seconds=0.4,
+                    merge_rrf_seconds=0.1,
+                    candidate_total_seconds=1.0,
+                ),
+            ]
+        ),
+    )
+
+    profiling = report["candidate_profiling"]
+    assert profiling["stages"]["query_embedding_seconds"]["mean"] == pytest.approx(0.15)
+    assert profiling["stages"]["candidate_total_seconds"]["median"] == pytest.approx(0.85)
+    assert profiling["average_percentage_of_candidate_total"][
+        "query_embedding_seconds"
+    ] == pytest.approx((0.1 / 0.7 * 100.0 + 0.2 / 1.0 * 100.0) / 2.0)
+    assert report["queries"][0]["candidate_timing_seconds"] == {
+        "query_embedding_seconds": 0.1,
+        "dense_search_seconds": 0.2,
+        "bm25_search_seconds": 0.3,
+        "merge_rrf_seconds": 0.05,
+        "candidate_total_seconds": 0.7,
+    }

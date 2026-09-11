@@ -27,6 +27,11 @@ class FakeRetriever:
         return self.results
 
 
+@dataclass
+class TimedFakeDenseRetriever(FakeRetriever):
+    last_query_embedding_seconds: float = 0.0
+
+
 def test_hybrid_retriever_queries_both_routes_and_fuses() -> None:
     dense = FakeRetriever([_chunk("dense", 0.1), _chunk("shared", 0.2)], [])
     bm25 = FakeRetriever([_chunk("shared", 10.0), _chunk("bm25", 9.0)], [])
@@ -53,6 +58,25 @@ def test_candidate_pool_keeps_all_deduplicated_route_results() -> None:
     assert bm25.calls == [("原始问题", 20)]
     assert [result.chunk_id for result in results] == ["shared", "dense", "bm25"]
     assert [result.rrf_rank for result in results] == [1, 2, 3]
+
+
+def test_candidate_pool_with_timing_preserves_results_and_records_stages() -> None:
+    dense = TimedFakeDenseRetriever(
+        [_chunk("dense", 0.1), _chunk("shared", 0.2)],
+        [],
+        last_query_embedding_seconds=0.001,
+    )
+    bm25 = FakeRetriever([_chunk("shared", 10.0), _chunk("bm25", 9.0)], [])
+    retriever = HybridRetriever(dense_retriever=dense, bm25_retriever=bm25)
+
+    results, timing = retriever.candidate_pool_with_timing("原始问题", route_k=2)
+
+    assert [result.chunk_id for result in results] == ["shared", "dense", "bm25"]
+    assert timing.query_embedding_seconds == 0.001
+    assert timing.dense_search_seconds == 0.0
+    assert timing.bm25_search_seconds >= 0.0
+    assert timing.merge_rrf_seconds >= 0.0
+    assert timing.candidate_total_seconds >= 0.0
 
 
 def test_hybrid_retriever_validates_query_and_k() -> None:

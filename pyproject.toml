@@ -32,6 +32,7 @@ agenticrag-search-reranker = "agenticrag.retrieval.search_reranker:main"
 agenticrag-eval-retrieval = "eval.retrieval_runner:main"
 agenticrag-eval-ragas = "eval.ragas.runner:main"
 agenticrag-eval-v1-2-control = "eval.v1_2_control_runner:main"
+agenticrag-benchmark-embedding = "eval.embedding_benchmark:main"
 agenticrag-ask = "agenticrag.rag.ask:main"
 
 [project.optional-dependencies]

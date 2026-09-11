@@ -218,6 +218,30 @@ uv run agenticrag-search-reranker \
 `RERANK_LOCAL_FILES_ONLY=true` 验证离线复现。默认使用 CPU、batch size 8、总输入长度
 512；CUDA 和 FP16 只能通过 `RERANK_DEVICE`、`RERANK_USE_FP16` 显式开启。
 
+### V1.2 Candidate Generation Profiling
+
+如需定位 candidate generation 的耗时组成，使用现有 47-query retrieval eval：
+
+```bash
+RERANK_BACKEND=remote \
+RERANK_REMOTE_URL=http://192.168.31.238:8001 \
+uv run agenticrag-eval-retrieval \
+  --retriever reranker \
+  --dataset eval/datasets/retrieval_eval_v2.jsonl \
+  --output artifacts/profiling/v1_2_remote_candidate_profile.json
+```
+
+输出中的 `queries[].candidate_timing_seconds` 提供 query embedding、Dense search、
+BM25 search、RRF merge 和 candidate total 的逐 query 耗时；
+`candidate_profiling` 提供 47-query 的 mean、median、p95 及平均占比。独立测量当前
+Qwen query embedding 的 cold/warm latency：
+
+```bash
+uv run --extra embeddings agenticrag-benchmark-embedding --warm-iterations 20
+```
+
+详见 [V1.2 Candidate Generation Profiling](docs/v1_2_candidate_profiling.md)。
+
 也可以把相同的 BGE Reranker 放到另一台 GPU 主机上，通过 vLLM HTTP 服务执行。此时
 仅替换 Reranker backend，Dense/BM25/RRF、候选集和最终排序逻辑不变。在 `.env` 中配置：
 
