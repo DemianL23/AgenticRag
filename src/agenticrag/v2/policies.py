@@ -13,11 +13,17 @@ from .schemas import (
     EvidenceGrade,
     GroundedFinding,
     HITLRequest,
+    QueryRevision,
     ResumeRequest,
     RetrievalTask,
     RoutingDecision,
 )
-from .types import GlobalAnswerOutcome, GlobalExecutionStatus, TaskCapability
+from .types import (
+    GlobalAnswerOutcome,
+    GlobalExecutionStatus,
+    TaskAnswerOutcome,
+    TaskCapability,
+)
 
 SUPPORTED_CAPABILITY: TaskCapability = "retrieval_synthesis"
 RECOVERY_BY_FAILURE_REASON = {
@@ -48,6 +54,33 @@ def detect_response_language(text: str) -> str:
 
 def capability_is_supported(capability: TaskCapability) -> bool:
     return capability == SUPPORTED_CAPABILITY
+
+
+def capability_outcome(capability: TaskCapability) -> TaskAnswerOutcome | None:
+    """Return the pre-retrieval business outcome for a capability."""
+    return None if capability_is_supported(capability) else "unsupported"
+
+
+def retrieval_attempt_available(
+    revision: QueryRevision, budget: V2BudgetConfig
+) -> bool:
+    _validate_count(len(revision.retrieval_attempts), "retrieval attempt")
+    return len(revision.retrieval_attempts) < budget.max_retrieval_attempts_per_revision
+
+
+def query_revision_available(task: RetrievalTask, budget: V2BudgetConfig) -> bool:
+    _validate_count(len(task.query_revisions), "query revision")
+    return len(task.query_revisions) < budget.max_query_revisions
+
+
+def hitl_round_available(hitl_rounds: int, budget: V2BudgetConfig) -> bool:
+    _validate_count(hitl_rounds, "HITL round")
+    return hitl_rounds < budget.max_hitl_rounds
+
+
+def _validate_count(count: int, label: str) -> None:
+    if isinstance(count, bool) or count < 0:
+        raise ValueError(f"{label} count 必须是非负整数")
 
 
 def validate_decomposition(
@@ -85,18 +118,16 @@ def routing_decision(
     reason_prefix: str = "deterministic policy",
 ) -> RoutingDecision:
     """Apply the frozen route priority; LLM output cannot override it."""
+    if not capability_is_supported(capability):
+        raise ValueError(
+            "routing_decision 只接受 retrieval_synthesis capability；"
+            "unsupported capability 必须由 Capability Policy 终止"
+        )
     available = set(input_evidence_ids)
     grade.validate_against_evidence_ids(available)
     supporting_valid = bool(grade.supporting_evidence_ids) and set(
         grade.supporting_evidence_ids
     ) <= available
-    if not capability_is_supported(capability):
-        return RoutingDecision(
-            id=decision_id,
-            grade_record_id=grade_record_id,
-            route="unsupported",
-            reason=f"{reason_prefix}: unsupported capability",
-        )
     if grade.ambiguity == "missing_slot":
         return RoutingDecision(
             id=decision_id,

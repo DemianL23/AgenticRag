@@ -55,7 +55,10 @@ def _ordinal(value: int) -> int:
 def _task_token(value: str) -> str:
     if not isinstance(value, str) or not value.startswith("SQ_"):
         raise ValueError("task ID 必须以 SQ_ 开头")
-    return value.replace("_", "", 1)
+    ordinal = value[3:]
+    if not ordinal.isdigit() or int(ordinal) <= 0 or value != f"SQ_{int(ordinal):03d}":
+        raise ValueError("task ID 格式非法")
+    return f"SQ{int(ordinal):03d}"
 
 
 def _revision_token(value: str) -> str:
@@ -64,12 +67,22 @@ def _revision_token(value: str) -> str:
     parts = value.split("_")
     if len(parts) != 3 or not parts[1].startswith("SQ"):
         raise ValueError("query revision ID 格式非法")
-    return f"QR{parts[1][2:]}"
+    _task_token(f"SQ_{parts[1][2:]}")
+    revision_ordinal = parts[2]
+    if (
+        not revision_ordinal.isdigit()
+        or int(revision_ordinal) <= 0
+        or value != f"QR_{parts[1]}_{int(revision_ordinal):03d}"
+    ):
+        raise ValueError("query revision ID 格式非法")
+    return f"QR{int(revision_ordinal):03d}"
 
 
 def validate_request_id(value: str) -> str:
     try:
-        UUID(value, version=4)
+        parsed = UUID(value)
     except (ValueError, AttributeError, TypeError) as exc:
         raise ValueError("request_id 必须是 UUID4") from exc
+    if parsed.version != 4 or str(parsed) != value:
+        raise ValueError("request_id 必须是 canonical UUID4")
     return value

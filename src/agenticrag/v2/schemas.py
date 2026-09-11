@@ -11,6 +11,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from .ids import validate_request_id
 from .types import (
     AnswerLimitationKind,
     Complexity,
@@ -477,7 +478,8 @@ class HITLRequest(V2Model):
     request_id: str = Field(min_length=1)
     items: list[HITLItem] = Field(min_length=1)
 
-    _validate_text = field_validator("id", "request_id")(_nonempty)
+    _validate_text = field_validator("id")(_nonempty)
+    _validate_request_id = field_validator("request_id")(validate_request_id)
 
     @model_validator(mode="after")
     def validate_unique_items(self) -> "HITLRequest":
@@ -515,7 +517,8 @@ class ResumeRequest(V2Model):
     hitl_request_id: str = Field(min_length=1)
     responses: list[HITLResponse] = Field(min_length=1)
 
-    _validate_text = field_validator("request_id", "hitl_request_id")(_nonempty)
+    _validate_request_id = field_validator("request_id")(validate_request_id)
+    _validate_hitl_request_id = field_validator("hitl_request_id")(_nonempty)
 
     @model_validator(mode="after")
     def validate_unique_responses(self) -> "ResumeRequest":
@@ -552,7 +555,7 @@ class StageRunResult(V2Model):
     trace_ref: str | None = None
     error: ExecutionError | None = None
 
-    _validate_request = field_validator("request_id")(_nonempty)
+    _validate_request = field_validator("request_id")(validate_request_id)
 
     @model_validator(mode="after")
     def validate_terminal_contract(self) -> "StageRunResult":
