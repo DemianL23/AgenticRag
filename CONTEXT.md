@@ -58,3 +58,48 @@ _Avoid_：将会话存储等同于会话记忆
 
 **会话记忆（Conversation Memory）**：在处理当前问题时利用同一会话的历史内容，使回答能够承接前文。第一版不启用此能力。
 _Avoid_：仅因保存了历史消息就称系统具有记忆
+
+**检索任务（Retrieval Task）**：由一个用户问题直接形成或拆分得到的最小必要问题单元，能够独立检索和判断是否可回答。一个复杂问题可以包含多个检索任务，但任务之间不依赖彼此的答案。
+_Avoid_：子 Agent；把任意关键词查询都称为检索任务
+
+**查询修订（Query Revision）**：用户补充或选择范围后，对检索任务语义形成的一次明确更新。系统为改善检索表达而进行的自动改写不构成查询修订。
+_Avoid_：Query Rewrite；把每次查询文本变化都称为修订
+
+**检索尝试（Retrieval Attempt）**：在同一个查询修订内，使用某一种明确检索表达和策略执行的一次完整检索。检索尝试描述执行历史，不代表产生了新问题语义。
+_Avoid_：Query Revision；隐藏式重试
+
+**证据（Evidence）**：来自参考文档、可由稳定 chunk 标识追溯的内容片段，是中间结论和最终回答能够引用的唯一事实来源。
+_Avoid_：将 Query Rewrite、Step-back、HyDE 或模型生成文本称为证据
+
+**证据评估（Evidence Grade）**：对某个检索任务当前证据的相关性、可回答性、歧义和可恢复性所作的结构化判断。证据评估描述证据状态，不直接决定工作流动作。
+_Avoid_：Route；用单一模糊分数代替不同判断维度
+
+**恢复检索（Recovery Retrieval）**：首次证据不足但仍可能改善时，在受限预算内改变检索表达并再次检索的动作。它不改变用户问题语义，也不形成新的查询修订。
+_Avoid_：无限重试；HITL 用户澄清
+
+**有据中间结论（Grounded Finding）**：针对一个检索任务、由已验证证据支持并保留证据标识的中间回答。它是供最终合成使用的结论，不是新的证据。
+_Avoid_：Evidence；无来源的子答案
+
+**执行状态（Execution Status）**：描述请求或检索任务当前是否运行、等待、完成或因技术问题失败。执行完成只表示流程终止，不代表问题已经得到完整回答。
+_Avoid_：Answer Outcome；把知识不足称为执行失败
+
+**回答结果（Answer Outcome）**：描述工作流在业务上是否完整回答、部分回答、无知识、不支持或仍未解决。它与模型、检索或持久化是否正常执行分别记录。
+_Avoid_：Execution Status；从最终自然语言中反推结果类型
+
+**无知识（No Knowledge）**：系统正常完成检索和判断，但当前知识库证据不足以支持回答。它不表示任务超出系统能力，也不表示执行发生故障。
+_Avoid_：Unsupported；Technical Failure
+
+**不支持（Unsupported）**：问题需要当前 RAG 版本明确未提供的能力，因此系统有意停止该任务。它不表示知识库没有相关资料，也不表示系统发生技术故障。
+_Avoid_：No Knowledge；Technical Failure
+
+**未解决（Unresolved）**：系统确认仍需用户消除歧义，但允许的人机确认预算已经耗尽，因而无法继续完成任务。
+_Avoid_：No Knowledge；Unsupported
+
+**技术失败（Technical Failure）**：模型、检索、校验或持久化等执行环节未能按契约完成，导致任务或请求无法正常推进。它不构成回答结果，不能被改写为无知识或不支持。
+_Avoid_：No Knowledge；Unsupported；Unresolved
+
+**工作流检查点（Workflow Checkpoint）**：为暂停后继续同一请求而保存的可恢复工作流状态。它用于执行连续性，不等同于会话存储或会话记忆。
+_Avoid_：Conversation Storage；Conversation Memory
+
+**降级检索（Degraded Retrieval）**：检索流程通过已定义的备用路径返回结果，但没有完成首选排序路径。降级结果仍可使用，但必须与正常检索明确区分并单独统计。
+_Avoid_：把 fallback 伪装成正常 Reranker 输出
