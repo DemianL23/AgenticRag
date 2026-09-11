@@ -70,6 +70,7 @@ async def evaluate_end_to_end(
     report_name: str = "ragas",
     run_id: str | None = None,
     git_commit: str | None = None,
+    git_dirty: bool | None = None,
     resolved_config: dict[str, Any] | None = None,
 ) -> RagasReport:
     """Materialize and evaluate each RAG sample while isolating failures."""
@@ -83,22 +84,33 @@ async def evaluate_end_to_end(
     for index, sample in enumerate(qa_samples, start=1):
         print(f"[{index}/{len(qa_samples)}] {sample.sample_id}: RAG + RAGAS")
         blank_scores = {name: None for name in report_metric_names}
-        trace: AnswerTrace | None = None
         try:
             trace = service.answer_with_trace(sample.question, k=top_k)
-            contexts = retrieved_contexts_from_chunks(trace.retrieved_chunks)
+        except Exception as exc:  # noqa: BLE001 - one bad sample must not stop eval
+            sample_reports.append(
+                SampleReport(
+                    sample_id=sample.sample_id,
+                    question=sample.question,
+                    reference=sample.reference,
+                    generated_answer=None,
+                    retrieved_chunk_ids=(),
+                    retrieved_contexts=(),
+                    metrics=blank_scores,
+                    metric_reasons={},
+                    evaluation_error={"pipeline": _format_error(exc)},
+                )
+            )
+            continue
+
+        contexts = retrieved_contexts_from_chunks(trace.retrieved_chunks)
+        try:
             result = await evaluator.evaluate(
                 user_input=sample.question,
                 reference=sample.reference,
                 response=trace.answer.answer,
                 retrieved_contexts=contexts,
             )
-            numeric_score = numeric_correctness(
-                sample.reference,
-                trace.answer.answer,
-                task_type=sample.task_type,
-            )
-            scores = {**result.scores, NUMERIC_CORRECTNESS: numeric_score}
+        except Exception as exc:  # noqa: BLE001 - one bad sample must not stop eval
             sample_reports.append(
                 SampleReport(
                     sample_id=sample.sample_id,
@@ -109,36 +121,60 @@ async def evaluate_end_to_end(
                         chunk.chunk_id for chunk in trace.retrieved_chunks
                     ),
                     retrieved_contexts=tuple(contexts),
-                    metrics=scores,
-                    metric_reasons=result.reasons,
-                    evaluation_error=result.errors or None,
+                    metrics={**blank_scores, NUMERIC_CORRECTNESS: _safe_numeric_score(
+                        sample.reference,
+                        trace.answer.answer,
+                        task_type=sample.task_type,
+                    )},
+                    metric_reasons={},
+                    evaluation_error={"evaluator": _format_error(exc)},
                     retrieval_trace=retrieval_trace_to_record(trace),
                 )
             )
-        except Exception as exc:  # noqa: BLE001 - one bad sample must not stop eval
-            retrieved_chunk_ids: tuple[str, ...] = ()
-            retrieved_contexts: tuple[str, ...] = ()
-            if trace is not None:
-                retrieved_chunk_ids = tuple(
-                    chunk.chunk_id for chunk in trace.retrieved_chunks
-                )
-                retrieved_contexts = tuple(
-                    retrieved_contexts_from_chunks(trace.retrieved_chunks)
-                )
+            continue
+
+        try:
+            numeric_score = numeric_correctness(
+                sample.reference,
+                trace.answer.answer,
+                task_type=sample.task_type,
+            )
+        except Exception as exc:  # noqa: BLE001 - numeric score is diagnostic only
             sample_reports.append(
                 SampleReport(
                     sample_id=sample.sample_id,
                     question=sample.question,
                     reference=sample.reference,
-                    generated_answer=None,
-                    retrieved_chunk_ids=retrieved_chunk_ids,
-                    retrieved_contexts=retrieved_contexts,
-                    metrics=blank_scores,
-                    metric_reasons={},
-                    evaluation_error={"pipeline": _format_error(exc)},
+                    generated_answer=trace.answer.answer,
+                    retrieved_chunk_ids=tuple(
+                        chunk.chunk_id for chunk in trace.retrieved_chunks
+                    ),
+                    retrieved_contexts=tuple(contexts),
+                    metrics={**blank_scores, NUMERIC_CORRECTNESS: None},
+                    metric_reasons=result.reasons,
+                    evaluation_error={"numeric_correctness": _format_error(exc)},
                     retrieval_trace=retrieval_trace_to_record(trace),
                 )
             )
+            continue
+
+        scores = {**result.scores, NUMERIC_CORRECTNESS: numeric_score}
+        sample_reports.append(
+            SampleReport(
+                sample_id=sample.sample_id,
+                question=sample.question,
+                reference=sample.reference,
+                generated_answer=trace.answer.answer,
+                retrieved_chunk_ids=tuple(
+                    chunk.chunk_id for chunk in trace.retrieved_chunks
+                ),
+                retrieved_contexts=tuple(contexts),
+                metrics=scores,
+                metric_reasons=result.reasons,
+                evaluation_error=result.errors or None,
+                retrieval_trace=retrieval_trace_to_record(trace),
+            )
+        )
 
     aggregate_metrics, aggregate_counts = aggregate_scores(
         sample_reports, report_metric_names
@@ -178,6 +214,7 @@ async def evaluate_end_to_end(
         report_name=report_name,
         run_id=run_id,
         git_commit=git_commit,
+        git_dirty=git_dirty,
         resolved_config=resolved_config,
         retrieval_record=_service_retrieval_record(service),
         retrieval_summary=_retrieval_summary(retrieval_traces),
@@ -220,6 +257,19 @@ def _service_retrieval_record(service: AnswerService) -> dict[str, Any] | None:
     except Exception as exc:  # noqa: BLE001 - report creation must remain available
         return {"record_error": _format_error(exc)}
     return record if isinstance(record, dict) else {"record_error": "not_a_mapping"}
+
+
+def _safe_numeric_score(
+    reference: str,
+    answer: str,
+    *,
+    task_type: str | None,
+) -> float | None:
+    """Keep evaluator failures from hiding an independently computed score."""
+    try:
+        return numeric_correctness(reference, answer, task_type=task_type)
+    except Exception:  # noqa: BLE001 - numeric score is diagnostic only
+        return None
 
 
 def _retrieval_summary(traces: Sequence[dict[str, Any]]) -> dict[str, Any] | None:

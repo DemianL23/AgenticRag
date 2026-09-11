@@ -98,6 +98,7 @@ async def _run_cli(args: argparse.Namespace) -> None:
         report_name="v1_2_end_to_end_control",
         run_id=run_id,
         git_commit=_git_commit(),
+        git_dirty=_git_dirty(),
         resolved_config={
             "generation": generation_config.to_record(),
             "embedding": embedding_config.to_record(),
@@ -144,6 +145,22 @@ def _git_commit() -> str | None:
         return None
     commit = result.stdout.strip()
     return commit or None
+
+
+def _git_dirty() -> bool | None:
+    project_root = Path(__file__).resolve().parents[2]
+    try:
+        result = subprocess.run(
+            ["git", "status", "--porcelain", "--untracked-files=all"],
+            cwd=project_root,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return bool(result.stdout.strip())
 
 
 def _ragas_version() -> str:

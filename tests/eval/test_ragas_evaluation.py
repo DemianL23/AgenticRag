@@ -310,3 +310,4 @@ def test_report_serialization_contains_required_audit_fields(tmp_path: Path) -> 
     assert saved["samples"][0]["evaluation_error"] is None
     assert saved["report_name"] == "ragas"
     assert saved["run_id"] is None
+    assert saved["git_dirty"] is None

@@ -54,6 +54,7 @@ class RagasReport:
     report_name: str = "ragas"
     run_id: str | None = None
     git_commit: str | None = None
+    git_dirty: bool | None = None
     resolved_config: dict[str, Any] | None = None
     retrieval_record: dict[str, Any] | None = None
     retrieval_summary: dict[str, Any] | None = None
@@ -80,6 +81,7 @@ class RagasReport:
             "report_name": self.report_name,
             "run_id": self.run_id,
             "git_commit": self.git_commit,
+            "git_dirty": self.git_dirty,
             "resolved_config": self.resolved_config,
             "retrieval_record": self.retrieval_record,
             "retrieval_summary": self.retrieval_summary,

@@ -1254,7 +1254,7 @@ uv run agenticrag-eval-v1-2-control
 Reranker Top-5。报告写入 `artifacts/eval/v1_2_end_to_end_control/<run_id>/report.json`；
 每次运行生成新的 UUID `run_id`，若指定的 `--output` 已存在则拒绝覆盖。
 报告同时保存每条样本的答案、上下文、RRF/rerank trace、fallback/耗时、
-resolved config 和模型 revision。
+resolved config、模型 revision，以及运行时的 `git_commit` / `git_dirty`。
 
 ### Module 1：V2 Schema、ID、Config 与 Policy
 

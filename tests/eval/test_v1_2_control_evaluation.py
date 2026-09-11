@@ -1,6 +1,6 @@
 import asyncio
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from agenticrag.generation.schemas import GeneratedAnswer
@@ -81,6 +81,13 @@ class FakeEvaluator:
         return RagasMetricResult(scores={"faithfulness": 1.0}, reasons={}, errors={})
 
 
+class RaisingEvaluator:
+    metric_names = ("faithfulness",)
+
+    async def evaluate(self, **kwargs: object) -> RagasMetricResult:
+        raise RuntimeError("judge unavailable")
+
+
 def test_control_report_contains_v12_trace_and_aggregate_diagnostics(
     tmp_path: Path,
 ) -> None:
@@ -133,4 +140,72 @@ def test_control_report_contains_v12_trace_and_aggregate_diagnostics(
         "mean_model_load_seconds": 0.2,
         "mean_rerank_seconds": 0.3,
         "mean_retrieval_seconds": 0.6,
+    }
+
+
+def test_evaluator_failure_keeps_generated_answer_and_retrieval_trace(
+    tmp_path: Path,
+) -> None:
+    dataset = tmp_path / "qa.jsonl"
+    dataset.write_text(
+        json.dumps({"id": "q1", "question": "问题", "gold": "答案"}) + "\n",
+        encoding="utf-8",
+    )
+
+    report = asyncio.run(
+        evaluate_end_to_end(
+            dataset,
+            FakeControlService(_trace()),  # type: ignore[arg-type]
+            RaisingEvaluator(),
+            top_k=5,
+            limit=None,
+            generation_model="qwen-plus",
+            embedding_model="qwen-embedding",
+            evaluator_model="qwen-max",
+            evaluator_embedding_model="qwen-embedding",
+            ragas_version="0.4.3",
+        )
+    )
+
+    sample = report.samples[0]
+    assert sample.generated_answer == "control answer"
+    assert sample.retrieved_chunk_ids == ("doc_001:p0002:c000",)
+    assert sample.retrieved_contexts == ("control evidence",)
+    assert sample.retrieval_trace is not None
+    assert sample.evaluation_error == {"evaluator": "RuntimeError: judge unavailable"}
+    assert sample.metrics["faithfulness"] is None
+
+
+def test_control_report_counts_reranker_fallbacks(tmp_path: Path) -> None:
+    dataset = tmp_path / "qa.jsonl"
+    dataset.write_text(
+        json.dumps({"id": "q1", "question": "问题", "gold": "答案"}) + "\n",
+        encoding="utf-8",
+    )
+
+    report = asyncio.run(
+        evaluate_end_to_end(
+            dataset,
+            FakeControlService(
+                replace(
+                    _trace(),
+                    fallback_used=True,
+                    fallback_reason="inference_error",
+                )
+            ),  # type: ignore[arg-type]
+            FakeEvaluator(),
+            top_k=5,
+            limit=None,
+            generation_model="qwen-plus",
+            embedding_model="qwen-embedding",
+            evaluator_model="qwen-max",
+            evaluator_embedding_model="qwen-embedding",
+            ragas_version="0.4.3",
+        )
+    )
+
+    assert report.retrieval_summary is not None
+    assert report.retrieval_summary["retrieval_degraded_queries"] == 1
+    assert report.retrieval_summary["fallback_reason_counts"] == {
+        "inference_error": 1
     }
