@@ -134,8 +134,7 @@ def evaluate_retrieval(
 def main() -> None:
     args = _parse_args()
     if args.retriever == "reranker":
-        from agenticrag.reranking.bge import BGEReranker
-        from agenticrag.reranking.config import RerankerConfig
+        from agenticrag.reranking.factory import create_reranker
         from agenticrag.retrieval.reranking_retriever import (
             DEFAULT_RERANK_FINAL_TOP_K,
             RerankingRetriever,
@@ -166,7 +165,7 @@ def main() -> None:
                 dense_retriever=MilvusRetriever(milvus_config=dense_config),
                 bm25_retriever=BM25Retriever(milvus_config=bm25_config),
             ),
-            reranker=BGEReranker(RerankerConfig.from_env()),
+            reranker=create_reranker(),
         )
         report = evaluate_reranking(
             args.dataset,

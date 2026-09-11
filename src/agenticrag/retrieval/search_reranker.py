@@ -6,8 +6,7 @@ import argparse
 
 from agenticrag.rag.integrations.milvus import MilvusConfig
 from agenticrag.rag.integrations.milvus_bm25 import BM25MilvusConfig
-from agenticrag.reranking.bge import BGEReranker
-from agenticrag.reranking.config import RerankerConfig
+from agenticrag.reranking.factory import create_reranker
 from agenticrag.retrieval.bm25_retriever import BM25Retriever
 from agenticrag.retrieval.hybrid_retriever import HybridRetriever
 from agenticrag.retrieval.milvus_retriever import MilvusRetriever
@@ -34,12 +33,16 @@ def main() -> None:
             dense_retriever=MilvusRetriever(milvus_config=dense_config),
             bm25_retriever=BM25Retriever(milvus_config=bm25_config),
         ),
-        reranker=BGEReranker(RerankerConfig.from_env()),
+        reranker=create_reranker(),
     )
     trace = retriever.search_with_trace(args.query, k=args.k)
 
     print(f"Top {len(trace.results)} V1.2-A reranked results:")
     print(f"candidate_pool_size: {len(trace.candidate_pool)}")
+    print(f"reranker_backend: {trace.reranker_backend}")
+    print(f"reranker_endpoint: {trace.reranker_endpoint}")
+    print(f"rerank_request_seconds: {trace.rerank_request_seconds:.6f}")
+    print(f"rerank_candidate_count: {trace.rerank_candidate_count}")
     print(f"fallback_used: {trace.fallback_used}")
     print(f"fallback_reason: {trace.fallback_reason}")
     print(f"model_load_seconds: {trace.model_load_seconds:.6f}")

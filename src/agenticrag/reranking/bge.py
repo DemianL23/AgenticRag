@@ -97,6 +97,7 @@ class BGEReranker(BaseReranker):
         return {
             **self.config.to_record(),
             "backend": "FlagEmbedding.FlagReranker",
+            "backend_type": "local",
             "query_max_length": None,
             "effective_default_query_max_length": self.config.max_length * 3 // 4,
             "resolved_revision": self._resolved_revision,

@@ -246,6 +246,14 @@ def retrieval_trace_to_record(trace: AnswerTrace | None) -> dict[str, Any] | Non
         "candidate_seconds": float(getattr(retrieval_trace, "candidate_seconds", 0.0)),
         "model_load_seconds": float(getattr(retrieval_trace, "model_load_seconds", 0.0)),
         "rerank_seconds": float(getattr(retrieval_trace, "rerank_seconds", 0.0)),
+        "reranker_backend": getattr(retrieval_trace, "reranker_backend", None),
+        "reranker_endpoint": getattr(retrieval_trace, "reranker_endpoint", None),
+        "rerank_request_seconds": float(
+            getattr(retrieval_trace, "rerank_request_seconds", 0.0)
+        ),
+        "rerank_candidate_count": int(
+            getattr(retrieval_trace, "rerank_candidate_count", 0)
+        ),
         "total_seconds": float(getattr(retrieval_trace, "total_seconds", 0.0)),
     }
 

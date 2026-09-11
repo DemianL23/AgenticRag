@@ -17,8 +17,7 @@ from agenticrag.rag.integrations.embeddings import EmbeddingConfig
 from agenticrag.rag.integrations.milvus import MilvusConfig
 from agenticrag.rag.integrations.milvus_bm25 import BM25MilvusConfig
 from agenticrag.rag.v1_2_control import V12ControlAnswerService
-from agenticrag.reranking.bge import BGEReranker
-from agenticrag.reranking.config import RerankerConfig
+from agenticrag.reranking.factory import create_reranker
 from agenticrag.retrieval.bm25_retriever import BM25Retriever
 from agenticrag.retrieval.hybrid_retriever import HybridRetriever
 from agenticrag.retrieval.milvus_retriever import MilvusRetriever
@@ -55,7 +54,6 @@ async def _run_cli(args: argparse.Namespace) -> None:
     generation_config = GenerationConfig.from_env()
     embedding_config = EmbeddingConfig.from_env()
     evaluator_config = RagasEvaluatorConfig.from_env()
-    reranker_config = RerankerConfig.from_env()
 
     dense_base = MilvusConfig.from_env()
     bm25_base = BM25MilvusConfig.from_env()
@@ -76,7 +74,7 @@ async def _run_cli(args: argparse.Namespace) -> None:
             ),
             bm25_retriever=BM25Retriever(milvus_config=bm25_config),
         ),
-        reranker=BGEReranker(reranker_config),
+        reranker=create_reranker(),
     )
     service = V12ControlAnswerService(
         retriever=retriever,
@@ -103,7 +101,7 @@ async def _run_cli(args: argparse.Namespace) -> None:
             "generation": generation_config.to_record(),
             "embedding": embedding_config.to_record(),
             "evaluator": evaluator_config.to_record(),
-            "reranker": reranker_config.to_record(),
+            "reranker": retriever.reranker.model_record(),
             "retrieval_pipeline": {
                 "dense": asdict(dense_config),
                 "bm25": asdict(bm25_config),

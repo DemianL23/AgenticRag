@@ -218,6 +218,32 @@ uv run agenticrag-search-reranker \
 `RERANK_LOCAL_FILES_ONLY=true` 验证离线复现。默认使用 CPU、batch size 8、总输入长度
 512；CUDA 和 FP16 只能通过 `RERANK_DEVICE`、`RERANK_USE_FP16` 显式开启。
 
+也可以把相同的 BGE Reranker 放到另一台 GPU 主机上，通过 vLLM HTTP 服务执行。此时
+仅替换 Reranker backend，Dense/BM25/RRF、候选集和最终排序逻辑不变。在 `.env` 中配置：
+
+```dotenv
+RERANK_BACKEND=remote
+RERANK_REMOTE_URL=http://192.168.31.238:8001
+RERANK_REMOTE_MODEL=BAAI/bge-reranker-v2-m3
+RERANK_REMOTE_TIMEOUT_SECONDS=60
+```
+
+先从当前开发环境验证服务可达：
+
+```bash
+curl -X POST http://192.168.31.238:8001/v1/rerank \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "BAAI/bge-reranker-v2-m3",
+    "query": "什么是 Agentic RAG？",
+    "documents": ["Python 是一种编程语言。", "Agentic RAG 让 Agent 根据任务自主决定何时以及如何进行检索。"],
+    "top_n": 2
+  }'
+```
+
+Remote backend 使用返回项中的 `index` 映射 score，再交给现有 RerankingRetriever 排序；
+远程请求失败时仍按现有规则原子回退到 RRF。
+
 ## 模块八：Qwen 生成
 
 生成模块位于 `src/agenticrag/generation/`，使用百炼的 OpenAI 兼容接口调用 Qwen。Retriever 和生成器彼此独立：生成器只接收问题与已召回的 `RetrievedChunk`，不会自行查询 Milvus。

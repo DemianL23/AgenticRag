@@ -14,7 +14,7 @@ from agenticrag.reranking.base import (
     RerankerInferenceError,
     RerankerLoadError,
 )
-from agenticrag.reranking.bge import BGEReranker
+from agenticrag.reranking.factory import create_reranker
 from agenticrag.retrieval.base import BaseRetriever
 from agenticrag.retrieval.hybrid_retriever import (
     DEFAULT_HYBRID_ROUTE_TOP_K,
@@ -53,6 +53,10 @@ class RerankingSearchTrace:
     model_load_seconds: float
     rerank_seconds: float
     total_seconds: float
+    reranker_backend: str | None = None
+    reranker_endpoint: str | None = None
+    rerank_request_seconds: float = 0.0
+    rerank_candidate_count: int = 0
 
 
 class RerankingRetriever(BaseRetriever):
@@ -69,7 +73,7 @@ class RerankingRetriever(BaseRetriever):
         _validate_positive_int(route_k, "route_k")
         _validate_positive_int(rrf_report_k, "rrf_report_k")
         self.hybrid_retriever = hybrid_retriever or HybridRetriever()
-        self.reranker = reranker or BGEReranker()
+        self.reranker = reranker or create_reranker()
         self.route_k = route_k
         self.rrf_report_k = rrf_report_k
 
@@ -103,6 +107,11 @@ class RerankingRetriever(BaseRetriever):
         rrf_top20 = candidate_pool[: self.rrf_report_k]
 
         if not candidate_pool:
+            metadata = _reranker_trace_metadata(
+                self.reranker,
+                rerank_seconds=0.0,
+                candidate_count=0,
+            )
             return RerankingSearchTrace(
                 results=(),
                 candidate_pool=(),
@@ -114,6 +123,7 @@ class RerankingRetriever(BaseRetriever):
                 model_load_seconds=0.0,
                 rerank_seconds=0.0,
                 total_seconds=time.perf_counter() - total_started,
+                **metadata,
             )
 
         model_load_seconds = 0.0
@@ -181,6 +191,11 @@ class RerankingRetriever(BaseRetriever):
             results = _fallback_results(candidate_pool, k=k, reason=fallback_reason)
             fallback_used = True
 
+        metadata = _reranker_trace_metadata(
+            self.reranker,
+            rerank_seconds=rerank_seconds,
+            candidate_count=len(candidate_pool),
+        )
         return RerankingSearchTrace(
             results=tuple(results),
             candidate_pool=tuple(candidate_pool),
@@ -192,6 +207,7 @@ class RerankingRetriever(BaseRetriever):
             model_load_seconds=model_load_seconds,
             rerank_seconds=rerank_seconds,
             total_seconds=time.perf_counter() - total_started,
+            **metadata,
         )
 
     def model_record(self) -> dict[str, Any]:
@@ -293,3 +309,27 @@ def _to_reranked_chunk(
 def _validate_positive_int(value: int, field_name: str) -> None:
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
         raise ValueError(f"{field_name} 必须是正整数")
+
+
+def _reranker_trace_metadata(
+    reranker: BaseReranker,
+    *,
+    rerank_seconds: float,
+    candidate_count: int,
+) -> dict[str, Any]:
+    """Expose backend diagnostics without changing the ranking contract."""
+    try:
+        record = reranker.model_record()
+    except Exception:  # noqa: BLE001 - diagnostics must not break retrieval
+        record = {}
+    request_seconds = record.get("request_seconds", rerank_seconds)
+    try:
+        request_seconds = float(request_seconds or 0.0)
+    except (TypeError, ValueError):
+        request_seconds = rerank_seconds
+    return {
+        "reranker_backend": record.get("backend_type", record.get("backend")),
+        "reranker_endpoint": record.get("endpoint"),
+        "rerank_request_seconds": request_seconds,
+        "rerank_candidate_count": int(record.get("candidate_count", candidate_count)),
+    }

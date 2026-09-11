@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import math
 import os
 import re
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 
+DEFAULT_RERANK_BACKEND = "local"
 DEFAULT_RERANK_MODEL = "BAAI/bge-reranker-v2-m3"
 DEFAULT_RERANK_MODEL_REVISION = "953dc6f6f85a1b2dbfca4c34a2796e7dde08d41e"
 DEFAULT_RERANK_DEVICE = "cpu"
@@ -16,6 +19,9 @@ DEFAULT_RERANK_BATCH_SIZE = 8
 DEFAULT_RERANK_MAX_LENGTH = 512
 DEFAULT_RERANK_USE_FP16 = False
 DEFAULT_RERANK_LOCAL_FILES_ONLY = False
+DEFAULT_RERANK_REMOTE_URL = "http://127.0.0.1:8001"
+DEFAULT_RERANK_REMOTE_MODEL = DEFAULT_RERANK_MODEL
+DEFAULT_RERANK_REMOTE_TIMEOUT_SECONDS = 60.0
 _DEVICE_PATTERN = re.compile(r"^(cpu|cuda(?::\d+)?)$")
 
 
@@ -81,6 +87,74 @@ class RerankerConfig:
         return asdict(self)
 
 
+@dataclass(frozen=True, slots=True)
+class RemoteRerankerConfig:
+    """HTTP settings for a remote vLLM BGE reranker endpoint."""
+
+    url: str = DEFAULT_RERANK_REMOTE_URL
+    model: str = DEFAULT_RERANK_REMOTE_MODEL
+    timeout_seconds: float = DEFAULT_RERANK_REMOTE_TIMEOUT_SECONDS
+
+    @classmethod
+    def from_env(cls, dotenv_path: Path | None = None) -> "RemoteRerankerConfig":
+        """Read ``RERANK_REMOTE_*`` settings from the environment and .env."""
+        try:
+            from dotenv import load_dotenv
+        except ImportError as exc:  # pragma: no cover - project dependency
+            raise RuntimeError("读取 .env 需要 python-dotenv") from exc
+
+        load_dotenv(dotenv_path=dotenv_path, override=False)
+        config = cls(
+            url=os.getenv("RERANK_REMOTE_URL", DEFAULT_RERANK_REMOTE_URL).strip(),
+            model=os.getenv(
+                "RERANK_REMOTE_MODEL", DEFAULT_RERANK_REMOTE_MODEL
+            ).strip(),
+            timeout_seconds=_read_float(
+                "RERANK_REMOTE_TIMEOUT_SECONDS",
+                DEFAULT_RERANK_REMOTE_TIMEOUT_SECONDS,
+            ),
+        )
+        config.validate()
+        return config
+
+    def validate(self) -> None:
+        parsed = urlparse(self.url)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            raise ValueError("RERANK_REMOTE_URL 必须是合法的 http(s) URL")
+        if not self.model:
+            raise ValueError("RERANK_REMOTE_MODEL 不能为空")
+        if not math.isfinite(self.timeout_seconds) or self.timeout_seconds <= 0:
+            raise ValueError("RERANK_REMOTE_TIMEOUT_SECONDS 必须大于 0")
+
+    @property
+    def endpoint(self) -> str:
+        """Return the public rerank endpoint without duplicate slashes."""
+        return f"{self.url.rstrip('/')}/v1/rerank"
+
+    def to_record(self) -> dict[str, Any]:
+        self.validate()
+        return {
+            "url": self.url,
+            "endpoint": self.endpoint,
+            "model": self.model,
+            "timeout_seconds": self.timeout_seconds,
+        }
+
+
+def reranker_backend_from_env(dotenv_path: Path | None = None) -> str:
+    """Return the configured backend, defaulting to the frozen local path."""
+    try:
+        from dotenv import load_dotenv
+    except ImportError as exc:  # pragma: no cover - project dependency
+        raise RuntimeError("读取 .env 需要 python-dotenv") from exc
+
+    load_dotenv(dotenv_path=dotenv_path, override=False)
+    backend = os.getenv("RERANK_BACKEND", DEFAULT_RERANK_BACKEND).strip().lower()
+    if backend not in {"local", "remote"}:
+        raise ValueError("RERANK_BACKEND 只能是 local 或 remote")
+    return backend
+
+
 def _read_optional(name: str) -> str | None:
     value = os.getenv(name)
     return value.strip() if value and value.strip() else None
@@ -106,3 +180,13 @@ def _read_bool(name: str, default: bool) -> bool:
     if normalized in {"0", "false", "no", "n", "off"}:
         return False
     raise ValueError(f"{name} 必须是 true/false")
+
+
+def _read_float(name: str, default: float) -> float:
+    value = os.getenv(name)
+    if value is None or not value.strip():
+        return default
+    try:
+        return float(value)
+    except ValueError as exc:
+        raise ValueError(f"{name} 必须是数字") from exc
