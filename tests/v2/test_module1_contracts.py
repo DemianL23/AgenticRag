@@ -3,6 +3,7 @@ from __future__ import annotations
 from uuid import UUID
 
 import pytest
+from pydantic import ValidationError
 
 from agenticrag.v2.config import V2BudgetConfig, V2Config
 from agenticrag.v2.ids import (
@@ -240,6 +241,35 @@ def test_task_status_and_evidence_grade_invariants() -> None:
         }
     )
     validate_finding_provenance(finding, task)
+
+
+def test_evidence_grade_literal_contract_rejects_invalid_enums() -> None:
+    base = {
+        "relevance": "weak",
+        "answerability": "partial",
+        "ambiguity": "none",
+        "recoverability": "none",
+        "failure_reason": "terminology_gap",
+        "reason": "invalid enum test",
+        "supporting_evidence_ids": ["chunk-1"],
+    }
+    for field, value in (
+        ("recoverability", "maybe"),
+        ("relevance", "medium"),
+        ("answerability", "almost"),
+        ("ambiguity", "unknown"),
+    ):
+        with pytest.raises(ValidationError):
+            EvidenceGrade(**{**base, field: value})
+
+
+def test_evidence_grade_accepts_both_recoverability_literals() -> None:
+    assert _grade(recoverability="none").recoverability == "none"
+    assert _grade(
+        answerability="partial",
+        recoverability="likely",
+        failure_reason="terminology_gap",
+    ).recoverability == "likely"
 
 
 def test_grade_record_rejects_supporting_id_outside_grader_input() -> None:

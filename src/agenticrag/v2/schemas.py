@@ -7,7 +7,7 @@ retriever, database, network client, lock, or other runtime object.
 from __future__ import annotations
 
 from math import isfinite
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -223,10 +223,10 @@ class Evidence(V2Model):
 
 
 class EvidenceGrade(V2Model):
-    relevance: str
-    answerability: str
-    ambiguity: str
-    recoverability: str
+    relevance: Literal["none", "weak", "strong"]
+    answerability: Literal["none", "partial", "sufficient"]
+    ambiguity: Literal["none", "missing_slot", "multiple_candidates"]
+    recoverability: Literal["none", "likely"]
     failure_reason: EvidenceFailureReason
     reason: str = Field(min_length=1)
     missing_information: list[str] = Field(default_factory=list)
@@ -234,27 +234,6 @@ class EvidenceGrade(V2Model):
     supporting_evidence_ids: list[str] = Field(default_factory=list)
 
     _validate_reason = field_validator("reason")(_nonempty)
-
-    @field_validator("relevance")
-    @classmethod
-    def validate_relevance(cls, value: str) -> str:
-        if value not in {"none", "weak", "strong"}:
-            raise ValueError("relevance 非法")
-        return value
-
-    @field_validator("answerability")
-    @classmethod
-    def validate_answerability(cls, value: str) -> str:
-        if value not in {"none", "partial", "sufficient"}:
-            raise ValueError("answerability 非法")
-        return value
-
-    @field_validator("ambiguity")
-    @classmethod
-    def validate_ambiguity(cls, value: str) -> str:
-        if value not in {"none", "missing_slot", "multiple_candidates"}:
-            raise ValueError("ambiguity 非法")
-        return value
 
     @field_validator("missing_information", "missing_slots")
     @classmethod
