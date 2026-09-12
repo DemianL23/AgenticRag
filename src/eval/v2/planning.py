@@ -126,7 +126,7 @@ class PlanningSample:
 class CoverageUnitResult(V2Model):
     unit_index: int = Field(ge=0)
     covered: bool
-    matched_predicted_task_index: int | None = Field(default=None, ge=0)
+    matched_predicted_task_indices: list[int]
     reason: str = Field(min_length=1)
 
 
@@ -273,6 +273,7 @@ def evaluate_planning(
     decomposer_unmatched_units = 0
     matched_gold_units_with_expected_capability = 0
     complex_capability_unmatched_units = 0
+    unmatched_predicted_tasks_count = 0
     evaluation_incomplete = False
 
     for sample in samples:
@@ -394,12 +395,21 @@ def evaluate_planning(
                     decomposer_covered_units += covered
                     decomposer_requirement_units += total
                     decomposer_unmatched_units += total - covered
+                    matched_task_indices = {
+                        index
+                        for unit_result in coverage.units
+                        if unit_result.covered
+                        for index in unit_result.matched_predicted_task_indices
+                    }
+                    unmatched_predicted_tasks_count += len(tasks) - len(
+                        matched_task_indices
+                    )
                     for unit_result in coverage.units:
                         if not unit_result.covered:
                             complex_capability_unmatched_units += 1
                             continue
-                        predicted_index = unit_result.matched_predicted_task_index
-                        if predicted_index is None or predicted_index >= len(tasks):
+                        predicted_indices = unit_result.matched_predicted_task_indices
+                        if any(index >= len(tasks) for index in predicted_indices):
                             complex_capability_unmatched_units += 1
                             continue
                         expected_capability = annotation.required_information_units[
@@ -407,7 +417,10 @@ def evaluate_planning(
                         ].expected_capability
                         if expected_capability is not None:
                             matched_gold_units_with_expected_capability += 1
-                            if tasks[predicted_index].capability == expected_capability:
+                            if all(
+                                tasks[index].capability == expected_capability
+                                for index in predicted_indices
+                            ):
                                 complex_capability_correct += 1
                 except PlanningError as exc:
                     evaluation_incomplete = True
@@ -475,6 +488,7 @@ def evaluate_planning(
             "matched_gold_units_with_expected_capability": matched_gold_units_with_expected_capability,
             "complex_task_capability_total": matched_gold_units_with_expected_capability,
             "unmatched_gold_units_count": complex_capability_unmatched_units,
+            "unmatched_predicted_tasks_count": unmatched_predicted_tasks_count,
         },
         "structural_violations": structural,
         "evaluation_incomplete": evaluation_incomplete,
@@ -499,12 +513,19 @@ def validate_coverage_result(
     if actual_indices != expected_indices:
         raise ValueError("Coverage Judge 必须为每一个 gold unit 返回一次结果")
     for unit in result.units:
-        if unit.covered and unit.matched_predicted_task_index is None:
-            raise ValueError("covered=true 必须有 matched_predicted_task_index")
-        if not unit.covered and unit.matched_predicted_task_index is not None:
-            raise ValueError("covered=false 的 matched_predicted_task_index 必须为 null")
-        if unit.matched_predicted_task_index is not None and unit.matched_predicted_task_index >= task_count:
-            raise ValueError("matched_predicted_task_index 超出 predicted tasks 范围")
+        matched_indices = unit.matched_predicted_task_indices
+        if unit.covered and not matched_indices:
+            raise ValueError("covered=true 必须有 matched_predicted_task_indices")
+        if not unit.covered and matched_indices:
+            raise ValueError(
+                "covered=false 的 matched_predicted_task_indices 必须为空"
+            )
+        if len(matched_indices) != len(set(matched_indices)):
+            raise ValueError("matched_predicted_task_indices 不得重复")
+        if any(index < 0 or index >= task_count for index in matched_indices):
+            raise ValueError(
+                "matched_predicted_task_indices 超出 predicted tasks 范围"
+            )
 
 
 def _record_decomposition_structure(
@@ -537,8 +558,11 @@ def _build_judge_prompt(
     )
     return (
         "你是独立的 Module 2 Planning Judge。不要判断答案是否正确，也不要使用任何 gold answer。\n"
-        "只判断每个 gold required information unit 是否被 predicted task 在语义上覆盖。\n"
-        "covered=true 时必须给出对应 predicted task index，covered=false 时 index 必须为 null。\n"
+        "只判断每个 gold required information unit 是否被一个或多个 predicted tasks 在语义上完整覆盖。\n"
+        "一个 gold unit 可以由多个 predicted tasks 联合覆盖；不要强制 gold unit 与 predicted task 一一对应。\n"
+        "Decomposition 可以采用不同但语义等价的分组方式，covered 判断依据 matched tasks 的语义并集；不要因为分组方式不同就判未覆盖。\n"
+        "只有 matched tasks 的语义并集完整覆盖 gold unit 时才能 covered=true，不能把部分覆盖判为 covered=true。\n"
+        "covered=true 时 matched_predicted_task_indices 必须为非空且包含一个或多个合法 index；covered=false 时必须为 []。\n"
         "必须为每个 unit 返回一次结果，并给出简短理由。\n\n"
         f"原始问题：\n{question}\n\n"
         f"Gold required information units：\n{requirement_text}\n\n"

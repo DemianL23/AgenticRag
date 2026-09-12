@@ -92,13 +92,134 @@ def test_sidecar_join_fails_on_missing_id(tmp_path: Path) -> None:
 def test_coverage_judge_requires_every_unit_and_valid_match() -> None:
     result = CoverageJudgeResult(
         units=[
-            {"unit_index": 0, "covered": True, "matched_predicted_task_index": 0, "reason": "匹配"},
-            {"unit_index": 1, "covered": False, "matched_predicted_task_index": None, "reason": "缺失"},
+            {"unit_index": 0, "covered": True, "matched_predicted_task_indices": [0], "reason": "匹配"},
+            {"unit_index": 1, "covered": False, "matched_predicted_task_indices": [], "reason": "缺失"},
         ]
     )
     validate_coverage_result(result, unit_count=2, task_count=1)
     with pytest.raises(ValueError):
         validate_coverage_result(result, unit_count=1, task_count=1)
+
+
+@pytest.mark.parametrize(
+    ("covered", "indices"),
+    [
+        (True, []),
+        (False, [0]),
+        (True, [0, 0]),
+        (True, [1]),
+    ],
+)
+def test_coverage_matching_contract_rejects_invalid_indices(
+    covered: bool, indices: list[int]
+) -> None:
+    result = CoverageJudgeResult(
+        units=[
+            {
+                "unit_index": 0,
+                "covered": covered,
+                "matched_predicted_task_indices": indices,
+                "reason": "test",
+            }
+        ]
+    )
+    with pytest.raises(ValueError):
+        validate_coverage_result(result, unit_count=1, task_count=1)
+
+
+def test_coverage_matching_allows_joint_and_shared_task_matches() -> None:
+    result = CoverageJudgeResult(
+        units=[
+            {
+                "unit_index": 0,
+                "covered": True,
+                "matched_predicted_task_indices": [0, 1],
+                "reason": "联合覆盖",
+            },
+            {
+                "unit_index": 1,
+                "covered": True,
+                "matched_predicted_task_indices": [1],
+                "reason": "共享 task",
+            },
+        ]
+    )
+    validate_coverage_result(result, unit_count=2, task_count=2)
+
+
+@pytest.mark.parametrize(
+    ("second_capability", "expected_correct"),
+    [("retrieval_synthesis", 1), ("arithmetic", 0)],
+)
+def test_capability_accuracy_evaluates_all_matched_tasks(
+    tmp_path: Path, second_capability: str, expected_correct: int
+) -> None:
+    qa = tmp_path / "qa.jsonl"
+    annotations = tmp_path / "annotations.jsonl"
+    _write_jsonl(qa, [{"finqa_id": "complex", "question": "查询上限和金额"}])
+    _write_jsonl(
+        annotations,
+        [
+            {
+                "finqa_id": "complex",
+                "complexity": "complex",
+                "capability": None,
+                "required_information_units": [
+                    {
+                        "description": "年度上限和实际金额",
+                        "expected_capability": "retrieval_synthesis",
+                    }
+                ],
+                "expected_outcome": "complete",
+            }
+        ],
+    )
+    result = PlanningResult(
+        question="查询上限和金额",
+        normalized_question="查询上限和金额",
+        complexity_decision=ComplexityDecision(
+            complexity="complex", capability=None, reason="two independent facts"
+        ),
+        decomposition=DecompositionResult(
+            tasks=[
+                TaskDraft(
+                    query="年度上限", intent="提取上限", capability="retrieval_synthesis"
+                ),
+                TaskDraft(
+                    query="实际金额", intent="提取金额", capability=second_capability
+                ),
+            ],
+            decomposition_complete=True,
+        ),
+        router_attempts=1,
+        decomposer_attempts=1,
+    )
+    report = evaluate_planning(
+        qa,
+        annotations,
+        config=V2Config(),
+        planner=FakePlanner(result),
+        judge=PlanningCoverageJudge(
+            PlanningJudgeConfig(),
+            model=FakeStructuredModel(
+                {
+                    "units": [
+                        {
+                            "unit_index": 0,
+                            "covered": True,
+                            "matched_predicted_task_indices": [0, 1],
+                            "reason": "联合覆盖",
+                        }
+                    ]
+                }
+            ),
+        ),
+        run_id=f"capability-{second_capability}",
+    )
+
+    assert report["metrics"]["complex_task_capability_correct"] == expected_correct
+    assert report["metrics"]["matched_gold_units_with_expected_capability"] == 1
+    assert report["metrics"]["unmatched_gold_units_count"] == 0
 
 
 def test_planning_eval_records_metrics_and_independent_judge(tmp_path: Path) -> None:
@@ -171,8 +292,8 @@ def test_planning_eval_records_metrics_and_independent_judge(tmp_path: Path) -> 
         model=FakeStructuredModel(
             {
                 "units": [
-                    {"unit_index": 0, "covered": True, "matched_predicted_task_index": 0, "reason": "A"},
-                    {"unit_index": 1, "covered": True, "matched_predicted_task_index": 1, "reason": "B"},
+                    {"unit_index": 0, "covered": True, "matched_predicted_task_indices": [0], "reason": "A"},
+                    {"unit_index": 1, "covered": True, "matched_predicted_task_indices": [1], "reason": "B"},
                 ]
             }
         ),
@@ -232,8 +353,8 @@ def test_router_mismatch_is_quality_error_not_structural_violation(tmp_path: Pat
         model=FakeStructuredModel(
             {
                 "units": [
-                    {"unit_index": 0, "covered": False, "matched_predicted_task_index": None, "reason": "无 task"},
-                    {"unit_index": 1, "covered": False, "matched_predicted_task_index": None, "reason": "无 task"},
+                    {"unit_index": 0, "covered": False, "matched_predicted_task_indices": [], "reason": "无 task"},
+                    {"unit_index": 1, "covered": False, "matched_predicted_task_indices": [], "reason": "无 task"},
                 ]
             }
         ),

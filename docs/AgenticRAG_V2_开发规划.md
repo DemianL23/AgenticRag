@@ -1272,6 +1272,7 @@ resolved config、模型 revision，以及运行时的 `git_commit` / `git_dirty
 - Planning gold 使用 `v2_qa_annotations.jsonl` sidecar，通过 `finqa_id` 与根目录 `qa.jsonl` 一一 join；simple annotation 使用 top-level capability 且 unit 的 `expected_capability` 为 null，complex annotation 使用 null top-level capability 且每个 unit 必须有 `expected_capability`。
 - `required_information_units` 只描述可独立执行的业务信息单元，不包含跨 Task 的最终 synthesis、comparison 或 judgment；semantic coverage 由独立 Planning Judge 评估，结构约束由 deterministic code 检查。
 - Planning Judge 属于 eval-only infrastructure，使用独立的 `PlanningJudgeConfig`，不进入生产 `DecisionRole` 或 V2 runtime `DecisionModels`。
+- Planning Judge 的每个 gold unit 使用 `matched_predicted_task_indices: list[int]`；一个 unit 可以由多个 predicted tasks 的语义并集联合覆盖，多个 gold units 也可以共享同一 predicted task。
 
 ### Module 3：V1.2 Adapter、Fan-out 与 Evidence Merge
 
