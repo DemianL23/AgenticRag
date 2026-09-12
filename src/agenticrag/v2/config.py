@@ -9,7 +9,9 @@ from pydantic import Field
 
 from .schemas import V2Model
 
-DecisionRole = Literal["router", "decomposer", "grader", "rewrite", "hitl"]
+DecisionRole = Literal[
+    "router", "decomposer", "grader", "planning_judge", "rewrite", "hitl"
+]
 AnswerRole = Literal["simple_answer", "finding", "synthesis"]
 
 
@@ -57,12 +59,27 @@ class DecisionModels(V2Model):
     grader: DecisionModelConfig = Field(
         default_factory=lambda: DecisionModelConfig(role="grader")
     )
+    planning_judge: DecisionModelConfig = Field(
+        default_factory=lambda: DecisionModelConfig(role="planning_judge")
+    )
     rewrite: DecisionModelConfig = Field(
         default_factory=lambda: DecisionModelConfig(role="rewrite")
     )
     hitl: DecisionModelConfig = Field(
         default_factory=lambda: DecisionModelConfig(role="hitl")
     )
+
+    @classmethod
+    def from_env(cls) -> "DecisionModels":
+        defaults = cls()
+        return cls(
+            router=_decision_role_from_env(defaults.router),
+            decomposer=_decision_role_from_env(defaults.decomposer),
+            grader=_decision_role_from_env(defaults.grader),
+            planning_judge=_decision_role_from_env(defaults.planning_judge),
+            rewrite=_decision_role_from_env(defaults.rewrite),
+            hitl=_decision_role_from_env(defaults.hitl),
+        )
 
 
 class AnswerModels(V2Model):
@@ -112,8 +129,15 @@ class V2Config(V2Model):
 
     @classmethod
     def from_env(cls) -> "V2Config":
+        try:
+            from dotenv import load_dotenv
+
+            load_dotenv(override=False)
+        except ImportError:  # pragma: no cover - project dependency
+            pass
         return cls(
             budgets=V2BudgetConfig.from_env(),
+            decision_models=DecisionModels.from_env(),
             default_response_language=os.getenv(
                 "V2_DEFAULT_RESPONSE_LANGUAGE", "zh"
             ),
@@ -131,3 +155,73 @@ def _read_int(name: str, default: int) -> int:
         return int(value)
     except ValueError as exc:
         raise ValueError(f"{name} 必须是整数") from exc
+
+
+def _decision_role_from_env(config: DecisionModelConfig) -> DecisionModelConfig:
+    role_prefix = f"V2_{config.role.upper()}"
+    shared_prefix = "V2_DECISION"
+    return DecisionModelConfig(
+        **{
+            **config.model_dump(),
+            "model": os.getenv(
+                f"{role_prefix}_MODEL",
+                os.getenv(
+                    f"{shared_prefix}_MODEL",
+                    os.getenv("GENERATION_MODEL", config.model),
+                ),
+            ),
+            "model_revision": _read_optional(
+                f"{role_prefix}_MODEL_REVISION",
+                _read_optional(f"{shared_prefix}_MODEL_REVISION", config.model_revision),
+            ),
+            "endpoint_identifier": os.getenv(
+                f"{role_prefix}_ENDPOINT_IDENTIFIER",
+                os.getenv(
+                    f"{shared_prefix}_ENDPOINT_IDENTIFIER", config.endpoint_identifier
+                ),
+            ),
+            "temperature": _read_float(
+                f"{role_prefix}_TEMPERATURE",
+                _read_float(f"{shared_prefix}_TEMPERATURE", config.temperature),
+            ),
+            "timeout_seconds": _read_float(
+                f"{role_prefix}_TIMEOUT_SECONDS",
+                _read_float(f"{shared_prefix}_TIMEOUT_SECONDS", config.timeout_seconds),
+            ),
+            "max_tokens": _read_int(
+                f"{role_prefix}_MAX_TOKENS",
+                _read_int(f"{shared_prefix}_MAX_TOKENS", config.max_tokens),
+            ),
+            "thinking": _read_bool(
+                f"{role_prefix}_THINKING",
+                _read_bool(f"{shared_prefix}_THINKING", config.thinking),
+            ),
+        }
+    )
+
+
+def _read_optional(name: str, default: str | None) -> str | None:
+    value = os.getenv(name)
+    return value.strip() if value and value.strip() else default
+
+
+def _read_float(name: str, default: float) -> float:
+    value = os.getenv(name)
+    if value is None or not value.strip():
+        return default
+    try:
+        return float(value)
+    except ValueError as exc:
+        raise ValueError(f"{name} 必须是数字") from exc
+
+
+def _read_bool(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None or not value.strip():
+        return default
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "y", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "n", "off"}:
+        return False
+    raise ValueError(f"{name} 必须是 true/false")

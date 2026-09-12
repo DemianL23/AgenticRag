@@ -1268,6 +1268,9 @@ resolved config、模型 revision，以及运行时的 `git_commit` / `git_dirty
 - role-specific DecisionModelConfig。
 - simple/complex 和 capability structured output。
 - 2 到配置上限个独立 TaskDraft（baseline 上限为 4）与 decomposition limit。
+- Router 的 simple 输出必须带 top-level capability；complex 输出的 top-level capability 必须为 null，具体 capability 由 Decomposer 为每个 TaskDraft 声明。
+- Planning gold 使用 `v2_qa_annotations.jsonl` sidecar，通过 `finqa_id` 与根目录 `qa.jsonl` 一一 join；simple annotation 使用 top-level capability 且 unit 的 `expected_capability` 为 null，complex annotation 使用 null top-level capability 且每个 unit 必须有 `expected_capability`。
+- `required_information_units` 只描述可独立执行的业务信息单元，不包含跨 Task 的最终 synthesis、comparison 或 judgment；semantic coverage 由独立 Planning Judge 评估，结构约束由 deterministic code 检查。
 
 ### Module 3：V1.2 Adapter、Fan-out 与 Evidence Merge
 

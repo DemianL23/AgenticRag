@@ -2,6 +2,7 @@
 
 from .config import V2Config
 from .ids import new_request_id
+from .planning import PlanningError, PlanningResult, PlanningService, plan
 from .schemas import (
     ComplexityDecision,
     DecompositionResult,
@@ -32,4 +33,8 @@ __all__ = [
     "TaskDraft",
     "V2Config",
     "new_request_id",
+    "PlanningError",
+    "PlanningResult",
+    "PlanningService",
+    "plan",
 ]

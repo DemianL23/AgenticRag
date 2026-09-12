@@ -38,6 +38,7 @@ agenticrag-benchmark-embedding = "eval.embedding_benchmark:main"
 agenticrag-embedding-compatibility = "eval.embedding_compatibility:main"
 agenticrag-document-embedding-compatibility = "eval.document_embedding_compatibility:main"
 agenticrag-benchmark-document-embedding = "eval.document_embedding_benchmark:main"
+agenticrag-eval-v2-planning = "eval.v2.planning:main"
 agenticrag-ask = "agenticrag.rag.ask:main"
 
 [project.optional-dependencies]
