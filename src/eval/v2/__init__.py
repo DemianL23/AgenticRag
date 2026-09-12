@@ -3,6 +3,7 @@
 from .planning import (
     CoverageJudgeResult,
     PlanningAnnotation,
+    PlanningJudgeConfig,
     PlanningCoverageJudge,
     PlanningSample,
     evaluate_planning,
@@ -12,6 +13,7 @@ from .planning import (
 __all__ = [
     "CoverageJudgeResult",
     "PlanningAnnotation",
+    "PlanningJudgeConfig",
     "PlanningCoverageJudge",
     "PlanningSample",
     "evaluate_planning",

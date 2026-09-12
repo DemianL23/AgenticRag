@@ -284,7 +284,7 @@ class DecompositionResult(BaseModel):
 - complex：Router capability 必须为空，Decomposer 生成 2 到 `V2_MAX_SUBQUERIES` 个 TaskDraft；baseline 上限为 4。
 - Task query 必须非空、语义不重复、可独立检索。
 - 所有 Task 都是回答原问题所必需的 required task；V2 没有 optional task。
-- Baseline 无法在 4 个独立任务内完整表达问题时，必须返回 `decomposition_complete=false` 和 `decomposition_limit`，不得静默截断。实验即使覆盖上限，也必须保持一个经过校验的有限正整数。
+- Baseline 无法在 4 个独立任务内完整表达问题时，必须返回 `decomposition_complete=false`、`failure_reason=decomposition_limit` 和空 `tasks`，不得静默截断或保留超限 TaskDraft。
 - Task ID 由程序分配，LLM 不生成 ID。
 
 ### 6.4 RetrievalTask
@@ -1271,6 +1271,7 @@ resolved config、模型 revision，以及运行时的 `git_commit` / `git_dirty
 - Router 的 simple 输出必须带 top-level capability；complex 输出的 top-level capability 必须为 null，具体 capability 由 Decomposer 为每个 TaskDraft 声明。
 - Planning gold 使用 `v2_qa_annotations.jsonl` sidecar，通过 `finqa_id` 与根目录 `qa.jsonl` 一一 join；simple annotation 使用 top-level capability 且 unit 的 `expected_capability` 为 null，complex annotation 使用 null top-level capability 且每个 unit 必须有 `expected_capability`。
 - `required_information_units` 只描述可独立执行的业务信息单元，不包含跨 Task 的最终 synthesis、comparison 或 judgment；semantic coverage 由独立 Planning Judge 评估，结构约束由 deterministic code 检查。
+- Planning Judge 属于 eval-only infrastructure，使用独立的 `PlanningJudgeConfig`，不进入生产 `DecisionRole` 或 V2 runtime `DecisionModels`。
 
 ### Module 3：V1.2 Adapter、Fan-out 与 Evidence Merge
 

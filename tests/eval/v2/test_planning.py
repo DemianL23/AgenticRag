@@ -5,12 +5,13 @@ from pathlib import Path
 
 import pytest
 
-from agenticrag.v2.config import V2Config
+from agenticrag.v2.config import DecisionModelConfig, V2Config
 from agenticrag.v2.planning import PlanningResult
 from agenticrag.v2.schemas import ComplexityDecision, DecompositionResult, TaskDraft
 from eval.v2.planning import (
     CoverageJudgeResult,
     PlanningAnnotation,
+    PlanningJudgeConfig,
     PlanningCoverageJudge,
     RequiredInformationUnit,
     evaluate_planning,
@@ -53,6 +54,17 @@ def test_formal_sidecar_joins_qa_by_finqa_id() -> None:
         sample.annotation.finqa_id for sample in samples
     }
     assert len(digests["annotation_sha256"]) == 64
+
+
+def test_planning_judge_is_eval_only_and_not_a_runtime_decision_role() -> None:
+    config = V2Config()
+    judge_config = PlanningJudgeConfig(model="independent-judge")
+
+    assert not hasattr(config.decision_models, "planning_judge")
+    with pytest.raises(ValueError):
+        DecisionModelConfig(role="planning_judge")
+    assert judge_config.model == "independent-judge"
+    assert judge_config.temperature == 0
 
 
 def test_sidecar_join_fails_on_missing_id(tmp_path: Path) -> None:
@@ -124,6 +136,7 @@ def test_planning_eval_records_metrics_and_independent_judge(tmp_path: Path) -> 
         ],
     )
     config = V2Config()
+    judge_config = PlanningJudgeConfig()
     simple = PlanningResult.from_router(
         question="保险风险包括哪些？",
         decision=ComplexityDecision(
@@ -154,7 +167,7 @@ def test_planning_eval_records_metrics_and_independent_judge(tmp_path: Path) -> 
             return simple if "保险" in question else complex_result
 
     judge = PlanningCoverageJudge(
-        config,
+        judge_config,
         model=FakeStructuredModel(
             {
                 "units": [
@@ -176,8 +189,10 @@ def test_planning_eval_records_metrics_and_independent_judge(tmp_path: Path) -> 
     assert report["dataset"]["sample_count"] == 2
     assert report["metrics"]["complexity_accuracy"] == 1.0
     assert report["metrics"]["simple_capability_accuracy"] == 1.0
-    assert report["metrics"]["macro_decomposition_requirement_coverage"] == 1.0
-    assert report["metrics"]["micro_decomposition_requirement_coverage"] == 1.0
+    assert report["metrics"]["macro_pipeline_requirement_coverage"] == 1.0
+    assert report["metrics"]["micro_pipeline_requirement_coverage"] == 1.0
+    assert report["metrics"]["macro_decomposer_requirement_coverage_on_correct_route"] == 1.0
+    assert report["metrics"]["micro_decomposer_requirement_coverage_on_correct_route"] == 1.0
     assert report["metrics"]["complex_task_capability_accuracy"] == 1.0
     assert report["structural_violations"]["schema_invariant_violations"] == 0
     assert judge._model.calls == 1
@@ -213,7 +228,7 @@ def test_router_mismatch_is_quality_error_not_structural_violation(tmp_path: Pat
         )
     )
     judge = PlanningCoverageJudge(
-        config,
+        PlanningJudgeConfig(),
         model=FakeStructuredModel(
             {
                 "units": [
@@ -233,5 +248,8 @@ def test_router_mismatch_is_quality_error_not_structural_violation(tmp_path: Pat
     )
 
     assert report["structural_violations"]["schema_invariant_violations"] == 0
-    assert report["metrics"]["macro_decomposition_requirement_coverage"] == 0.0
+    assert report["metrics"]["macro_pipeline_requirement_coverage"] == 0.0
+    assert report["metrics"]["micro_pipeline_requirement_coverage"] == 0.0
+    assert report["metrics"]["macro_decomposer_requirement_coverage_on_correct_route"] is None
+    assert report["metrics"]["micro_decomposer_requirement_coverage_on_correct_route"] is None
     assert report["metrics"]["unmatched_gold_units_count"] == 2

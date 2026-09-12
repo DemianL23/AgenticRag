@@ -13,6 +13,8 @@ capability 只能使用以下值：
 - other_unsupported：其他不属于当前 V2 能力的任务。
 
 “从文档直接读取已经存在的增长率”是 retrieval_synthesis；“根据多个年份数据重新计算增长率”是 arithmetic。
+多个输入值不等于 complex：如果多个输入只是为了完成同一个最终 computation，整体仍然是 simple。比如“根据指标 A 和指标 B 计算 A/B”是 simple arithmetic；“对一组年度数据计算多年平均增长率”是 simple statistical_computation。
+只有存在两个或以上可以独立执行、且分别构成回答必要部分的任务时，才判断为 complex。
 simple 时必须返回该单一任务的 capability；complex 时 capability 必须为 null。
 不要拆出最终综合、比较或判断任务；这些属于后续 Answer Synthesis。
 只返回 ComplexityDecision 结构化结果，不要输出 Task ID、子查询或自然语言替代结果。"""

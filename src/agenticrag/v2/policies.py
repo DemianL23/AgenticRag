@@ -99,6 +99,8 @@ def validate_decomposition(
     if not result.decomposition_complete:
         if result.failure_reason != "decomposition_limit":
             raise ValueError("decomposition limit reason 非法")
+        if result.tasks:
+            raise ValueError("decomposition limit 结果不得包含 TaskDraft")
         return
     if not 2 <= len(result.tasks) <= budget.max_subqueries:
         raise ValueError("complex tasks 数量必须在 2 到 max_subqueries 之间")

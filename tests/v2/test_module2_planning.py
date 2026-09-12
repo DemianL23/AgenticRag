@@ -70,6 +70,29 @@ def test_simple_arithmetic_capability_is_preserved() -> None:
     assert result.simple_task.capability == "arithmetic"
 
 
+def test_simple_statistical_computation_is_preserved() -> None:
+    result = PlanningService(
+        V2Config(),
+        router_model=FakeStructuredModel(
+            [_simple_router("statistical_computation")]
+        ),
+    ).plan("对一组年度数据计算多年平均增长率")
+
+    assert result.complexity_decision.complexity == "simple"
+    assert result.complexity_decision.capability == "statistical_computation"
+
+
+def test_multiple_inputs_for_one_arithmetic_task_are_simple() -> None:
+    result = PlanningService(
+        V2Config(),
+        router_model=FakeStructuredModel([_simple_router("arithmetic")]),
+    ).plan("根据指标 A 和指标 B 计算 A/B")
+
+    assert result.complexity_decision.complexity == "simple"
+    assert result.simple_task is not None
+    assert result.simple_task.capability == "arithmetic"
+
+
 def test_complex_router_calls_decomposer_once_and_preserves_task_capabilities() -> None:
     router = FakeStructuredModel([_complex_router()])
     decomposer = FakeStructuredModel(
@@ -158,17 +181,45 @@ def test_complete_decomposition_over_limit_is_rejected() -> None:
     assert decomposer.calls == 2
 
 
+def test_exactly_four_tasks_are_accepted() -> None:
+    tasks = tuple(_task(f"任务 {index}", f"提取任务 {index}") for index in range(4))
+    result = PlanningService(
+        V2Config(),
+        router_model=FakeStructuredModel([_complex_router()]),
+        decomposer_model=FakeStructuredModel([_decomposition(*tasks)]),
+    ).plan("四个独立信息单元")
+
+    assert result.decomposition is not None
+    assert result.decomposition.decomposition_complete is True
+    assert len(result.decomposition.tasks) == 4
+
+
 def test_decomposition_limit_is_explicit_and_never_silently_truncated() -> None:
-    tasks = tuple(_task(f"任务 {index}", f"提取任务 {index}") for index in range(5))
     result = PlanningService(
         V2Config(),
         router_model=FakeStructuredModel([_complex_router()]),
         decomposer_model=FakeStructuredModel(
-            [_decomposition(*tasks, complete=False) | {"failure_reason": "decomposition_limit"}]
+            [_decomposition(complete=False) | {"failure_reason": "decomposition_limit"}]
         ),
     ).plan("需要五个独立信息单元")
 
     assert result.decomposition is not None
     assert result.decomposition.decomposition_complete is False
     assert result.decomposition.failure_reason == "decomposition_limit"
-    assert len(result.decomposition.tasks) == 5
+    assert result.decomposition.tasks == []
+
+
+def test_decomposition_limit_with_tasks_is_rejected() -> None:
+    invalid = _decomposition(
+        _task("任务 1", "提取任务 1"),
+        _task("任务 2", "提取任务 2"),
+        complete=False,
+    ) | {"failure_reason": "decomposition_limit"}
+    decomposer = FakeStructuredModel([invalid, invalid])
+    with pytest.raises(PlanningError):
+        PlanningService(
+            V2Config(),
+            router_model=FakeStructuredModel([_complex_router()]),
+            decomposer_model=decomposer,
+        ).plan("超出上限的问题")
+    assert decomposer.calls == 2

@@ -120,10 +120,15 @@ class DecompositionResult(V2Model):
                 raise ValueError("decomposition_complete=true 时 tasks 不能为空")
             if self.failure_reason is not None:
                 raise ValueError("完整 decomposition 不应有 failure_reason")
-        elif self.failure_reason != "decomposition_limit":
-            raise ValueError(
-                "decomposition_complete=false 时 failure_reason 必须为 decomposition_limit"
-            )
+        else:
+            if self.failure_reason != "decomposition_limit":
+                raise ValueError(
+                    "decomposition_complete=false 时 failure_reason 必须为 decomposition_limit"
+                )
+            if self.tasks:
+                raise ValueError(
+                    "decomposition_complete=false 时 tasks 必须为空，禁止保留超限 TaskDraft"
+                )
         normalized = [task.query.casefold().strip() for task in self.tasks]
         if len(normalized) != len(set(normalized)):
             raise ValueError("TaskDraft query 不得重复")

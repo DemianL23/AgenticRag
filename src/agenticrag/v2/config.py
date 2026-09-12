@@ -9,9 +9,7 @@ from pydantic import Field
 
 from .schemas import V2Model
 
-DecisionRole = Literal[
-    "router", "decomposer", "grader", "planning_judge", "rewrite", "hitl"
-]
+DecisionRole = Literal["router", "decomposer", "grader", "rewrite", "hitl"]
 AnswerRole = Literal["simple_answer", "finding", "synthesis"]
 
 
@@ -59,9 +57,6 @@ class DecisionModels(V2Model):
     grader: DecisionModelConfig = Field(
         default_factory=lambda: DecisionModelConfig(role="grader")
     )
-    planning_judge: DecisionModelConfig = Field(
-        default_factory=lambda: DecisionModelConfig(role="planning_judge")
-    )
     rewrite: DecisionModelConfig = Field(
         default_factory=lambda: DecisionModelConfig(role="rewrite")
     )
@@ -76,7 +71,6 @@ class DecisionModels(V2Model):
             router=_decision_role_from_env(defaults.router),
             decomposer=_decision_role_from_env(defaults.decomposer),
             grader=_decision_role_from_env(defaults.grader),
-            planning_judge=_decision_role_from_env(defaults.planning_judge),
             rewrite=_decision_role_from_env(defaults.rewrite),
             hitl=_decision_role_from_env(defaults.hitl),
         )

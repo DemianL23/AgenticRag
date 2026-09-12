@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import subprocess
 import time
 from dataclasses import dataclass
@@ -14,7 +15,7 @@ from uuid import uuid4
 
 from pydantic import Field, model_validator
 
-from agenticrag.v2.config import V2Config
+from agenticrag.v2.config import ModelRetryPolicy, V2Config
 from agenticrag.v2.planning import PlanningError, PlanningService, _invoke_structured
 from agenticrag.v2.schemas import TaskDraft, V2Model
 from agenticrag.v2.types import Complexity, GlobalAnswerOutcome, TaskCapability
@@ -22,6 +23,61 @@ from agenticrag.v2.types import Complexity, GlobalAnswerOutcome, TaskCapability
 DEFAULT_QA_PATH = Path("qa.jsonl")
 DEFAULT_ANNOTATION_PATH = Path("eval/datasets/v2_qa_annotations.jsonl")
 DEFAULT_OUTPUT_ROOT = Path("artifacts/eval/v2/module2_planning")
+
+
+class PlanningJudgeConfig(V2Model):
+    """Eval-only config; this is intentionally not a V2 runtime role."""
+
+    provider: str = "openai_compatible"
+    model: str = "qwen-plus"
+    model_revision: str | None = None
+    endpoint_identifier: str = "default"
+    temperature: float = Field(default=0.0, ge=0.0, le=0.0)
+    timeout_seconds: float = Field(default=120.0, gt=0.0)
+    max_tokens: int = Field(default=1024, gt=0)
+    thinking: bool = False
+    retry_policy: ModelRetryPolicy = Field(default_factory=ModelRetryPolicy)
+
+    @classmethod
+    def from_env(cls) -> "PlanningJudgeConfig":
+        try:
+            from dotenv import load_dotenv
+
+            load_dotenv(override=False)
+        except ImportError:  # pragma: no cover - project dependency
+            pass
+        return cls(
+            provider=os.getenv("V2_EVAL_PLANNING_JUDGE_PROVIDER", "openai_compatible"),
+            model=os.getenv("V2_EVAL_PLANNING_JUDGE_MODEL", "qwen-plus"),
+            model_revision=_read_optional("V2_EVAL_PLANNING_JUDGE_MODEL_REVISION"),
+            endpoint_identifier=os.getenv(
+                "V2_EVAL_PLANNING_JUDGE_ENDPOINT_IDENTIFIER", "eval-planning-judge"
+            ),
+            temperature=_read_float("V2_EVAL_PLANNING_JUDGE_TEMPERATURE", 0.0),
+            timeout_seconds=_read_float(
+                "V2_EVAL_PLANNING_JUDGE_TIMEOUT_SECONDS", 120.0
+            ),
+            max_tokens=_read_int("V2_EVAL_PLANNING_JUDGE_MAX_TOKENS", 1024),
+            thinking=_read_bool("V2_EVAL_PLANNING_JUDGE_THINKING", False),
+            retry_policy=ModelRetryPolicy(
+                max_attempts=_read_int("V2_EVAL_PLANNING_JUDGE_MAX_ATTEMPTS", 2),
+                retry_timeout=_read_bool(
+                    "V2_EVAL_PLANNING_JUDGE_RETRY_TIMEOUT", True
+                ),
+                retry_transient_provider_error=_read_bool(
+                    "V2_EVAL_PLANNING_JUDGE_RETRY_TRANSIENT", True
+                ),
+                retry_rate_limit=_read_bool(
+                    "V2_EVAL_PLANNING_JUDGE_RETRY_RATE_LIMIT", True
+                ),
+                retry_structured_output=_read_bool(
+                    "V2_EVAL_PLANNING_JUDGE_RETRY_STRUCTURED", True
+                ),
+            ),
+        )
+
+    def resolved_record(self) -> dict[str, Any]:
+        return self.model_dump(mode="json")
 
 
 class RequiredInformationUnit(V2Model):
@@ -88,8 +144,13 @@ class CoverageJudgeResult(V2Model):
 class PlanningCoverageJudge:
     """Independent structured judge for requirement-to-task semantic coverage."""
 
-    def __init__(self, config: V2Config | None = None, *, model: Any | None = None) -> None:
-        self.config = config or V2Config.from_env()
+    def __init__(
+        self,
+        config: PlanningJudgeConfig | None = None,
+        *,
+        model: Any | None = None,
+    ) -> None:
+        self.config = config or PlanningJudgeConfig.from_env()
         self._model = model
 
     def judge(
@@ -101,19 +162,45 @@ class PlanningCoverageJudge:
     ) -> tuple[CoverageJudgeResult, int]:
         model = self._model
         if model is None:
-            from agenticrag.v2.planning import create_decision_chat_model
-
-            model = create_decision_chat_model(self.config.decision_models.planning_judge)
+            model = create_planning_judge_model(self.config)
         return _invoke_structured(
             model,
             CoverageJudgeResult,
             _build_judge_prompt(question, requirements, predicted_tasks),
             role="planning_judge",
-            retry_policy=self.config.decision_models.planning_judge.retry_policy,
+            retry_policy=self.config.retry_policy,
             post_validate=lambda result: validate_coverage_result(
                 result, len(requirements), len(predicted_tasks)
             ),
         )
+
+
+def create_planning_judge_model(config: PlanningJudgeConfig) -> Any:
+    """Create the eval-only Judge model without adding a runtime role."""
+    from agenticrag.generation.config import GenerationConfig
+
+    try:
+        from langchain_openai import ChatOpenAI
+    except ImportError as exc:  # pragma: no cover - exercised only without extra
+        raise RuntimeError(
+            "Planning Judge 需要可选依赖，请执行：uv sync --extra generation"
+        ) from exc
+
+    generation_defaults = GenerationConfig.from_env()
+    base_url = os.getenv(
+        "V2_EVAL_PLANNING_JUDGE_BASE_URL", generation_defaults.base_url
+    )
+    api_key = os.getenv("V2_EVAL_PLANNING_JUDGE_API_KEY") or generation_defaults.api_key
+    return ChatOpenAI(
+        model=config.model,
+        api_key=api_key,
+        base_url=base_url,
+        temperature=config.temperature,
+        max_tokens=config.max_tokens,
+        timeout=config.timeout_seconds,
+        max_retries=0,
+        extra_body={"enable_thinking": config.thinking},
+    )
 
 
 def load_planning_samples(
@@ -160,8 +247,6 @@ def evaluate_planning(
     config = config or V2Config.from_env()
     samples, dataset_digests = load_planning_samples(qa_path, annotation_path)
     planner = planner or PlanningService(config)
-    if judge is not None and judge.config != config:
-        raise ValueError("Planning Judge 必须使用同一 resolved V2Config 的独立 role 配置")
 
     started = time.perf_counter()
     structural = {
@@ -178,11 +263,16 @@ def evaluate_planning(
     simple_capability_correct = 0
     simple_total = 0
     complex_capability_correct = 0
-    complex_capability_total = 0
-    unmatched_gold_units = 0
-    coverage_values: list[float] = []
-    covered_units_total = 0
-    requirement_units_total = 0
+    pipeline_coverage_values: list[float] = []
+    pipeline_covered_units = 0
+    pipeline_requirement_units = 0
+    pipeline_unmatched_units = 0
+    decomposer_coverage_values: list[float] = []
+    decomposer_covered_units = 0
+    decomposer_requirement_units = 0
+    decomposer_unmatched_units = 0
+    matched_gold_units_with_expected_capability = 0
+    complex_capability_unmatched_units = 0
     evaluation_incomplete = False
 
     for sample in samples:
@@ -252,8 +342,28 @@ def evaluate_planning(
                 structural["schema_invariant_violations"] += 1
 
         if annotation.complexity == "complex":
-            tasks = decomposition.tasks if predicted_complex and decomposition else []
-            if judge is None:
+            total = len(annotation.required_information_units)
+            pipeline_requirement_units += total
+            if not predicted_complex:
+                pipeline_coverage_values.append(0.0)
+                pipeline_unmatched_units += total
+                complex_capability_unmatched_units += total
+                item["coverage_judge"] = {
+                    "status": "not_run",
+                    "reason": "router_predicted_simple",
+                }
+            elif decomposition is None:
+                pipeline_coverage_values.append(0.0)
+                decomposer_coverage_values.append(0.0)
+                decomposer_requirement_units += total
+                pipeline_unmatched_units += total
+                decomposer_unmatched_units += total
+                complex_capability_unmatched_units += total
+                item["coverage_judge"] = {
+                    "status": "not_run",
+                    "reason": "decomposition_missing",
+                }
+            elif judge is None:
                 evaluation_incomplete = True
                 item["errors"].append(
                     {
@@ -262,6 +372,7 @@ def evaluate_planning(
                     }
                 )
             else:
+                tasks = decomposition.tasks
                 judge_started = time.perf_counter()
                 try:
                     coverage, judge_attempts = judge.judge(
@@ -275,24 +386,27 @@ def evaluate_planning(
                     }
                     item["latency_seconds"]["planning_judge"] = time.perf_counter() - judge_started
                     covered = sum(unit.covered for unit in coverage.units)
-                    total = len(annotation.required_information_units)
-                    coverage_values.append(covered / total)
-                    covered_units_total += covered
-                    requirement_units_total += total
+                    coverage_value = covered / total
+                    pipeline_coverage_values.append(coverage_value)
+                    decomposer_coverage_values.append(coverage_value)
+                    pipeline_covered_units += covered
+                    pipeline_unmatched_units += total - covered
+                    decomposer_covered_units += covered
+                    decomposer_requirement_units += total
+                    decomposer_unmatched_units += total - covered
                     for unit_result in coverage.units:
                         if not unit_result.covered:
-                            unmatched_gold_units += 1
-                            continue
-                        if unit_result.matched_predicted_task_index is None:
+                            complex_capability_unmatched_units += 1
                             continue
                         predicted_index = unit_result.matched_predicted_task_index
-                        if predicted_index >= len(tasks):
+                        if predicted_index is None or predicted_index >= len(tasks):
+                            complex_capability_unmatched_units += 1
                             continue
                         expected_capability = annotation.required_information_units[
                             unit_result.unit_index
                         ].expected_capability
                         if expected_capability is not None:
-                            complex_capability_total += 1
+                            matched_gold_units_with_expected_capability += 1
                             if tasks[predicted_index].capability == expected_capability:
                                 complex_capability_correct += 1
                 except PlanningError as exc:
@@ -315,6 +429,11 @@ def evaluate_planning(
             "sample_count": len(samples),
         },
         "resolved_config": config.resolved_record(),
+        "model_configs": {
+            "router": config.decision_models.router.model_dump(mode="json"),
+            "decomposer": config.decision_models.decomposer.model_dump(mode="json"),
+            "planning_judge": judge.config.resolved_record() if judge is not None else None,
+        },
         "metrics": {
             "complexity_accuracy": complexity_correct / len(samples) if samples else None,
             "complexity_correct": complexity_correct,
@@ -324,16 +443,38 @@ def evaluate_planning(
             else None,
             "simple_capability_correct": simple_capability_correct,
             "simple_capability_total": simple_total,
-            "macro_decomposition_requirement_coverage": sum(coverage_values) / len(coverage_values)
-            if coverage_values
+            "macro_pipeline_requirement_coverage": sum(pipeline_coverage_values)
+            / len(pipeline_coverage_values)
+            if pipeline_coverage_values
             else None,
-            "micro_decomposition_requirement_coverage": covered_units_total / requirement_units_total
-            if requirement_units_total
+            "micro_pipeline_requirement_coverage": pipeline_covered_units
+            / pipeline_requirement_units
+            if pipeline_requirement_units
             else None,
-            "complex_task_capability_accuracy": complex_capability_correct / complex_capability_total
-            if complex_capability_total
+            "pipeline_coverage_covered_units": pipeline_covered_units,
+            "pipeline_coverage_total_units": pipeline_requirement_units,
+            "pipeline_unmatched_units": pipeline_unmatched_units,
+            "macro_decomposer_requirement_coverage_on_correct_route": sum(
+                decomposer_coverage_values
+            )
+            / len(decomposer_coverage_values)
+            if decomposer_coverage_values
             else None,
-            "unmatched_gold_units_count": unmatched_gold_units,
+            "micro_decomposer_requirement_coverage_on_correct_route": decomposer_covered_units
+            / decomposer_requirement_units
+            if decomposer_requirement_units
+            else None,
+            "decomposer_coverage_covered_units": decomposer_covered_units,
+            "decomposer_coverage_total_units": decomposer_requirement_units,
+            "decomposer_unmatched_units": decomposer_unmatched_units,
+            "complex_task_capability_accuracy": complex_capability_correct
+            / matched_gold_units_with_expected_capability
+            if matched_gold_units_with_expected_capability
+            else None,
+            "complex_task_capability_correct": complex_capability_correct,
+            "matched_gold_units_with_expected_capability": matched_gold_units_with_expected_capability,
+            "complex_task_capability_total": matched_gold_units_with_expected_capability,
+            "unmatched_gold_units_count": complex_capability_unmatched_units,
         },
         "structural_violations": structural,
         "evaluation_incomplete": evaluation_incomplete,
@@ -463,6 +604,43 @@ def _git_dirty() -> bool | None:
         ["git", "status", "--porcelain"], capture_output=True, text=True, check=False
     )
     return result.stdout.strip() != "" if result.returncode == 0 else None
+
+
+def _read_optional(name: str) -> str | None:
+    value = os.getenv(name)
+    return value.strip() if value and value.strip() else None
+
+
+def _read_int(name: str, default: int) -> int:
+    value = os.getenv(name)
+    if value is None or not value.strip():
+        return default
+    try:
+        return int(value)
+    except ValueError as exc:
+        raise ValueError(f"{name} 必须是整数") from exc
+
+
+def _read_float(name: str, default: float) -> float:
+    value = os.getenv(name)
+    if value is None or not value.strip():
+        return default
+    try:
+        return float(value)
+    except ValueError as exc:
+        raise ValueError(f"{name} 必须是数字") from exc
+
+
+def _read_bool(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None or not value.strip():
+        return default
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "y", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "n", "off"}:
+        return False
+    raise ValueError(f"{name} 必须是 true/false")
 
 
 def main() -> None:
