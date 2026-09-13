@@ -1279,6 +1279,8 @@ resolved config、模型 revision，以及运行时的 `git_commit` / `git_dirty
 - `V12RetrievalBackend`。
 - bounded fan-out/reducer。
 - Evidence canonicalization、occurrence history、degraded trace。
+- Module 3 仅对 `retrieval_synthesis` task 调用现有 V1.2 `search_with_trace()`；每个 task 使用稳定的 QueryRevision/RetrievalAttempt，最终只把 Final Top-5 canonicalize 为 Evidence。
+- RRF Top-20、union candidate pool 和 reranker/embedding diagnostics 保留在 `RetrievalResult.diagnostics`，不进入 Evidence 列表；fan-out 结果按稳定 task ordinal 合并。
 
 ### Module 4：Evidence Grader 与 V2.1 Graph
 

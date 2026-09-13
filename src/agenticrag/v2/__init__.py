@@ -3,6 +3,13 @@
 from .config import V2Config
 from .ids import new_request_id
 from .planning import PlanningError, PlanningResult, PlanningService, plan
+from .retrieval import (
+    RetrievalBackendError,
+    RetrievalFanoutResult,
+    RetrievalFanoutService,
+    V12RetrievalAdapter,
+    V12RetrievalBackend,
+)
 from .schemas import (
     ComplexityDecision,
     DecompositionResult,
@@ -11,6 +18,7 @@ from .schemas import (
     GroundedFinding,
     QueryRevision,
     RetrievalAttempt,
+    RetrievalResult,
     RetrievalTask,
     RoutingDecision,
     StageRunResult,
@@ -26,6 +34,7 @@ __all__ = [
     "GroundedFinding",
     "QueryRevision",
     "RetrievalAttempt",
+    "RetrievalResult",
     "RetrievalTask",
     "RoutingDecision",
     "StageRunResult",
@@ -37,4 +46,9 @@ __all__ = [
     "PlanningResult",
     "PlanningService",
     "plan",
+    "RetrievalBackendError",
+    "RetrievalFanoutResult",
+    "RetrievalFanoutService",
+    "V12RetrievalAdapter",
+    "V12RetrievalBackend",
 ]

@@ -518,6 +518,7 @@ class RetrievalResult(V2Model):
     degraded_reason: str | None = None
     latency: RetrievalLatency = Field(default_factory=RetrievalLatency)
     trace_ref: str | None = None
+    diagnostics: dict[str, Any] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def validate_degraded_reason(self) -> "RetrievalResult":
