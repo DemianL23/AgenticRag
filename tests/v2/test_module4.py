@@ -9,7 +9,9 @@ from agenticrag.v2.grading import EvidenceGrader
 from agenticrag.v2.graph import build_graph_v2_1
 from agenticrag.v2.module4 import (
     Module4Service,
+    make_grade_record,
     materialize_retrieval_tasks,
+    route_for,
     unsupported_routing_decision,
 )
 from agenticrag.v2.planning import PlanningResult
@@ -20,6 +22,8 @@ from agenticrag.v2.schemas import (
     Evidence,
     EvidenceGrade,
     EvidenceOccurrence,
+    QueryRevision,
+    RetrievalAttempt,
     RetrievalResult,
     RetrievalTask,
     TaskDraft,
@@ -177,6 +181,62 @@ def _grade(**overrides: object) -> dict[str, object]:
     return value
 
 
+def _grader_input(
+    query: str, content: str
+) -> tuple[RetrievalTask, QueryRevision, list[Evidence]]:
+    task = RetrievalTask(
+        id="SQ_001",
+        ordinal=1,
+        query=query,
+        intent="answer the task query",
+        capability="retrieval_synthesis",
+        execution_status="running",
+    )
+    attempt = RetrievalAttempt(
+        id="ATT_SQ001_QR001_001",
+        ordinal=1,
+        strategy="original",
+        retrieval_query=query,
+        evidence_ids=["evidence-1"],
+    )
+    revision = QueryRevision(
+        id="QR_SQ001_001",
+        ordinal=1,
+        source="original",
+        query=query,
+        retrieval_attempts=[attempt],
+    )
+    evidence = [
+        Evidence(
+            evidence_id="evidence-1",
+            chunk_id="evidence-1",
+            content=content,
+            doc_id="doc-1",
+            source="source.pdf",
+            page=1,
+        )
+    ]
+    return task, revision, evidence
+
+
+def _grade_and_route(
+    query: str, content: str, mocked_grade: dict[str, object]
+) -> tuple[EvidenceGrade, object]:
+    task, revision, evidence = _grader_input(query, content)
+    config = V2Config()
+    grade, _attempts = EvidenceGrader(
+        config, model=FakeStructuredModel(mocked_grade)
+    ).grade(task=task, revision=revision, evidence=evidence)
+    task = task.model_copy(update={"query_revisions": [revision]})
+    record = make_grade_record(
+        task=task, revision=revision, evidence=evidence, grade=grade
+    )
+    task = task.model_copy(update={"grade_records": [record]})
+    return grade, route_for(
+        task=task, revision=revision, grade_record=record, config=config
+    )
+
+
 def test_materialization_assigns_stable_ids_and_does_not_materialize_limit() -> None:
     simple = materialize_retrieval_tasks(_simple_plan())
     assert [task.id for task in simple] == ["SQ_001"]
@@ -234,7 +294,94 @@ def test_grader_prompt_is_scoped_to_current_task_and_final_evidence() -> None:
     assert "candidate_pool" not in prompt
     assert "rrf_top20" not in prompt
     assert "expected.route" not in prompt
+    assert "query-side ambiguity" in prompt
+    assert "evidence deficiency" in prompt
+    assert "missing_slot" in prompt
+    assert "missing_information" in prompt
     assert result.tasks[0].grade_records[0].input_evidence_ids == ["question-evidence"]
+
+
+def test_true_missing_slot_routes_to_clarify() -> None:
+    grade, decision = _grade_and_route(
+        "该年度的研发费用是多少？",
+        "2022研发费用为 10；2023研发费用为 12。",
+        _grade(
+            ambiguity="missing_slot",
+            answerability="none",
+            supporting_evidence_ids=[],
+            missing_slots=["year"],
+            reason="task query did not specify the year",
+        ),
+    )
+
+    assert grade.ambiguity == "missing_slot"
+    assert grade.missing_slots == ["year"]
+    assert decision.route == "clarify"
+
+
+def test_complete_query_with_missing_evidence_routes_to_recover() -> None:
+    grade, decision = _grade_and_route(
+        "2023年的研发费用是多少？",
+        "2022研发费用为 10。",
+        _grade(
+            relevance="weak",
+            answerability="partial",
+            ambiguity="none",
+            recoverability="likely",
+            failure_reason="insufficient_coverage",
+            missing_information=["2023研发费用"],
+            supporting_evidence_ids=["evidence-1"],
+            reason="the query is complete but the 2023 fact is absent",
+        ),
+    )
+
+    assert grade.ambiguity == "none"
+    assert grade.missing_slots == []
+    assert grade.missing_information == ["2023研发费用"]
+    assert grade.recoverability == "likely"
+    assert grade.failure_reason == "insufficient_coverage"
+    assert decision.route == "recover"
+    assert decision.recovery_strategy == "direct_rewrite"
+
+
+@pytest.mark.parametrize(
+    ("query", "content", "missing_information"),
+    [
+        (
+            "Netflix stockholders' equity for periods prior to Q2 2023",
+            "Evidence covers Q2 2023 and year-end 2022 only.",
+            "stockholders' equity values for additional periods prior to Q2 2023",
+        ),
+        (
+            "Netflix gross margin history by year",
+            "Evidence contains operating margin and EBITDA margin only.",
+            "annual gross margin history",
+        ),
+    ],
+)
+def test_complete_netflix_queries_use_missing_information_not_missing_slot(
+    query: str, content: str, missing_information: str
+) -> None:
+    grade, decision = _grade_and_route(
+        query,
+        content,
+        _grade(
+            relevance="weak",
+            answerability="partial",
+            ambiguity="none",
+            recoverability="likely",
+            failure_reason="insufficient_coverage",
+            missing_information=[missing_information],
+            supporting_evidence_ids=["evidence-1"],
+            reason="the task is complete but retrieved evidence is incomplete",
+        ),
+    )
+
+    assert grade.ambiguity != "missing_slot"
+    assert grade.missing_slots == []
+    assert grade.missing_information == [missing_information]
+    assert decision.route == "recover"
+    assert decision.recovery_strategy == "direct_rewrite"
 
 
 def test_grader_supporting_ids_outside_input_are_technical_failure() -> None:
