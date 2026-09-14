@@ -1368,6 +1368,45 @@ dataset 或 recovery quality baseline。
 
 V2.2 的终止和失败语义稳定后才能进入 V2.3。
 
+#### Module 6 Freeze Record
+
+Module 6（GroundedFinding + Answer Synthesis）状态：**FROZEN**。
+
+- Implementation baseline：`4337c91ae88275c34e0a6f855badb7b738af795e`
+- 已完成：GroundedFinding generation、simple single-call answer path、complex per-task Finding path、deterministic global outcome aggregation、final synthesis、citation/provenance validation、V2.2 Graph、V2.2 CLI、V2.2 Stage Report，以及 non-resumable `waiting_user` HITL payload。
+- Finding generation：只有 latest route 为 `answer` 的 Task 才生成 GroundedFinding；输入限于当前 Task、latest legal GradeRecord、latest grade supporting evidence IDs、对应 raw Evidence 和 `response_language`。
+- Finding provenance：`GroundedFinding.evidence_ids` 必须为 `1..V2_MAX_EVIDENCE_PER_FINDING`、属于 latest Grade 的 supporting evidence IDs 且属于当前 Task 合法 Evidence；非法 provenance/citation 产生 task-level technical failure，不降级为 `no_knowledge`，也不通过删除引用静默修复。
+- Simple path：`simple_answer` role 只调用一次，生成 GroundedFinding 后通过 deterministic `SynthesizedAnswer` adapter 完成；不调用 `synthesis` role。
+- Complex path：每个 answerable Task 独立调用 `finding` role；随后由程序进行 deterministic global outcome aggregation，再调用 `synthesis` role。
+- Final Synthesizer 只接收 original question、required task business outcomes/failures、validated Findings，以及被 Findings 实际引用的 raw Evidence；不接收 candidate pool、RRF Top-20、全部 Top-5、未引用 Evidence 或 Gold/eval labels。
+- Global outcome：存在 valid Finding 时，所有 required Task complete 则为 `complete`，否则为 `partial`；不存在 valid Finding 时依次按 technical failure、unresolved、unsupported、`no_knowledge` 决定。Global outcome 由程序决定，不由 Synthesizer 决定。
+- Limitations：`complete` 时为空；`partial` 时覆盖每个 non-complete required Task，包括 `no_knowledge`、`unsupported`、`unresolved` 和 `technical_failure`。
+- Final citation：`final_answer.citation_evidence_ids` 必须是所有 valid GroundedFinding 引用 ID 的并集子集，完整链路为 Retrieval Evidence → Grade supporting evidence IDs → GroundedFinding evidence IDs → Final citation evidence IDs。
+- Final synthesis failure：已有 valid Findings 时，Synthesizer timeout、provider failure、structured output/citation/limitation contract failure 均使 request failed、`answer_outcome=None`、`final_answer=None`，不得使用字符串拼接 fallback。
+- Zero Finding：不调用 Final Synthesizer，根据 deterministic global outcome 生成 terminal response。
+- Recovery integration：复用 frozen Module 5 RecoveryService；Recovery 使用同一 QueryRevision 的 `ATT_001` → `ATT_002` re-grade/re-route，不创建 `ATT_003` 或新的 QueryRevision。
+- V2.2 HITL：`clarify` / `scope_select` 返回 `waiting_user`、`answer_outcome=None`、`final_answer=None`、`resumable=false` 和 structured `pending_hitl_request`；HITL semantic content 使用 `DecisionModelConfig.hitl`，程序负责 stable IDs、dedup、stable sort、scope limit 和 Evidence provenance validation。
+- Mixed answer + HITL 顺序：`terminalize_routes` → `generate_findings` → `build_hitl_request` → `waiting_finalize`；健康 Task 的 Finding 在进入 waiting_user 前保留。
+- V2.2 不实现 durable HITL resume、`interrupt()`、checkpoint、cross-process resume 或 QueryRevision HITL resume。
+
+Local validation：
+
+- `tests/v2/`：105 passed
+- `tests/eval/v2/`：34 passed
+- Full suite：261 passed，1 个既有 unrelated failure：`tests/generation/test_generation.py::test_generation_config_reads_env_without_slots_descriptor_bug`（GenerationConfig dotenv environment pollution；本 Module 未修改 Generation code）
+- `uv lock --check`：PASS
+- `python -m compileall -q src`：PASS
+- `git diff --check`：PASS
+- workspace：clean
+
+Real simple-path smoke：`98c2c16a-a384-4198-9031-5492a0b432c7`，commit `4337c91ae88275c34e0a6f855badb7b738af795e`，`git_dirty=false`；completed/complete，1 Task、1 Finding、`answer=1`，无 recovery、technical failure、degraded retrieval 或 invariant violation。
+
+Real complex-path smoke：`64fe21ef-ce59-4d75-8532-672155e0ef69`，commit `4337c91ae88275c34e0a6f855badb7b738af795e`，`git_dirty=false`；4 Tasks、4 Findings、`answer=4`，global completed/complete，无 recovery、technical failure、degraded retrieval 或 invariant violation。
+
+Known limitation：complex request 中 Decomposer 可能偏细粒度拆分；该问题属于 Module 2 Planning / Decomposer optimization，不是 Module 6 blocker。
+
+Module 6 is frozen。后续除 regression、explicit contract bug 或 Module 7 integration 所需的 documented compatibility fix 外，不得静默改变 Finding provenance、simple single-call、complex synthesis input boundary、deterministic global outcome、citation subset、technical failure 或 V2.2 non-resumable HITL contract。Module 6 不包含 durable HITL resume、LangGraph `interrupt()`、SQLite checkpoint、cross-process resume、persistence 或 Module 7+ 功能。
+
 ### Module 7：HITL Contract
 
 - HITLRequestBuilder、ScopeOption 和 ResumeRequest validators。
