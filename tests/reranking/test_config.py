@@ -73,18 +73,31 @@ def test_remote_reranker_config_reads_http_settings(
     assert config.to_record()["endpoint"] == config.endpoint
 
 
-def test_reranker_backend_defaults_to_local_and_rejects_unknown(
+def test_reranker_backend_defaults_to_remote_and_rejects_unknown(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     from agenticrag.reranking.config import reranker_backend_from_env
 
     monkeypatch.delenv("RERANK_BACKEND", raising=False)
-    assert reranker_backend_from_env(tmp_path / "missing.env") == "local"
+    assert reranker_backend_from_env(tmp_path / "missing.env") == "remote"
 
     monkeypatch.setenv("RERANK_BACKEND", "unsupported")
     with pytest.raises(ValueError, match="local 或 remote"):
         reranker_backend_from_env(tmp_path / "missing.env")
+
+
+@pytest.mark.parametrize("backend", ["remote", "local"])
+def test_reranker_backend_accepts_explicit_values(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    backend: str,
+) -> None:
+    from agenticrag.reranking.config import reranker_backend_from_env
+
+    monkeypatch.setenv("RERANK_BACKEND", backend)
+
+    assert reranker_backend_from_env(tmp_path / "missing.env") == backend
 
 
 def test_factory_selects_remote_backend(
@@ -100,3 +113,32 @@ def test_factory_selects_remote_backend(
     reranker = create_reranker(tmp_path / "missing.env")
 
     assert isinstance(reranker, RemoteBGEReranker)
+
+
+def test_factory_defaults_to_remote_backend(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from agenticrag.reranking.factory import create_reranker
+    from agenticrag.reranking.remote import RemoteBGEReranker
+
+    monkeypatch.delenv("RERANK_BACKEND", raising=False)
+    monkeypatch.setenv("RERANK_REMOTE_URL", "http://127.0.0.1:8001")
+
+    reranker = create_reranker(tmp_path / "missing.env")
+
+    assert isinstance(reranker, RemoteBGEReranker)
+
+
+def test_factory_selects_local_backend_when_explicit(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from agenticrag.reranking.bge import BGEReranker
+    from agenticrag.reranking.factory import create_reranker
+
+    monkeypatch.setenv("RERANK_BACKEND", "local")
+
+    reranker = create_reranker(tmp_path / "missing.env")
+
+    assert isinstance(reranker, BGEReranker)

@@ -1,4 +1,4 @@
-"""Environment-driven configuration for the V1.2 local reranker."""
+"""Environment-driven configuration for the V1.2 reranker backends."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 
-DEFAULT_RERANK_BACKEND = "local"
+DEFAULT_RERANK_BACKEND = "remote"
 DEFAULT_RERANK_MODEL = "BAAI/bge-reranker-v2-m3"
 DEFAULT_RERANK_MODEL_REVISION = "953dc6f6f85a1b2dbfca4c34a2796e7dde08d41e"
 DEFAULT_RERANK_DEVICE = "cpu"
@@ -142,7 +142,7 @@ class RemoteRerankerConfig:
 
 
 def reranker_backend_from_env(dotenv_path: Path | None = None) -> str:
-    """Return the configured backend, defaulting to the frozen local path."""
+    """Return the configured backend, defaulting to the remote path."""
     try:
         from dotenv import load_dotenv
     except ImportError as exc:  # pragma: no cover - project dependency
