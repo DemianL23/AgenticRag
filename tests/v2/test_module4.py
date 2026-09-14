@@ -5,7 +5,7 @@ import time
 import pytest
 
 from agenticrag.v2.config import V2Config
-from agenticrag.v2.grading import EvidenceGrader
+from agenticrag.v2.grading import EVIDENCE_GRADER_SYSTEM_PROMPT, EvidenceGrader
 from agenticrag.v2.graph import build_graph_v2_1
 from agenticrag.v2.module4 import (
     Module4Service,
@@ -298,6 +298,11 @@ def test_grader_prompt_is_scoped_to_current_task_and_final_evidence() -> None:
     assert "evidence deficiency" in prompt
     assert "missing_slot" in prompt
     assert "missing_information" in prompt
+    assert "multiple_candidates" in prompt
+    assert "有限" in prompt
+    assert "可枚举" in prompt
+    assert "Netflix gross margin history by year" not in prompt
+    assert "Netflix gross margin history by year" not in EVIDENCE_GRADER_SYSTEM_PROMPT
     assert result.tasks[0].grade_records[0].input_evidence_ids == ["question-evidence"]
 
 
@@ -317,6 +322,23 @@ def test_true_missing_slot_routes_to_clarify() -> None:
     assert grade.ambiguity == "missing_slot"
     assert grade.missing_slots == ["year"]
     assert decision.route == "clarify"
+
+
+def test_multiple_candidates_routes_to_scope_select_without_missing_slot() -> None:
+    grade, decision = _grade_and_route(
+        "公司的利润是多少？",
+        "上下文中存在营业利润、净利润和归母净利润。",
+        _grade(
+            ambiguity="multiple_candidates",
+            answerability="none",
+            supporting_evidence_ids=[],
+            reason="three finite metric interpretations are plausible",
+        ),
+    )
+
+    assert grade.ambiguity == "multiple_candidates"
+    assert grade.missing_slots == []
+    assert decision.route == "scope_select"
 
 
 def test_complete_query_with_missing_evidence_routes_to_recover() -> None:

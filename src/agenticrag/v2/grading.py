@@ -35,27 +35,34 @@ EVIDENCE_GRADER_SYSTEM_PROMPT = """你是 Agentic RAG V2 的 Evidence Grader。
 - ambiguity=missing_slot 时 missing_slots 必须非空。
 
 missing_slot 与 missing_information 的语义边界：
-- missing_slot 是 query-side ambiguity，只能表示 TASK QUERY 本身缺少必须由用户补充的参数，
-  例如未指定 year、company/entity、region，或在存在多个合理解释时未指定 metric。
+- missing_slot 是 query-side ambiguity，只能表示 TASK QUERY 本身缺少一个必须由用户补充的参数，
+  并且仅凭当前 query 无法形成有限、明确、可枚举的候选集合。典型参数包括未指定
+  year、region、company/entity 或无法从上下文推断的必要时间范围。
+- multiple_candidates 表示 TASK QUERY 本身已有多个明确、有限、合理且可枚举的解释，
+  应让用户在候选中选择，而不是请求用户补充一个无法界定的参数。
 - 不要把当前 Evidence 中缺失的事实当成 missing_slot。
 - 如果 task query 已经完整明确，但 Evidence 没有包含全部所需事实，必须使用
   ambiguity=none、missing_slots=[]，并把缺失事实写入 missing_information。
 - 只有 query 本身无法解释时才请求用户澄清；绝不能把 evidence deficiency 变成 clarify。
+- missing_slot 后续对应 clarify；multiple_candidates 后续对应 scope_select。
 - 如果补充检索有合理机会找到缺失事实，通常使用 recoverability=likely，并选择合适的
   failure_reason，例如 insufficient_coverage、query_mismatch、irrelevant_evidence、
   overly_specific 或 terminology_gap。
 
 最小对比示例（只表达判定原则，不是待回答的真实样本）：
-1. Task：“该年度的研发费用是多少？” Evidence：“2022研发费用……；2023研发费用……”
+ A. Task：“该年度的研发费用是多少？” Evidence：“2022研发费用……；2023研发费用……”
    query 没有指定年度，因此 ambiguity=missing_slot、missing_slots=["year"]。
-2. Task：“2023年的研发费用是多少？” Evidence：“只找到2022年研发费用。”
+ B. Task：“2023年的研发费用是多少？” Evidence：“只找到2022年研发费用。”
    query 已完整但证据不足，因此 ambiguity=none、missing_slots=[]、
    missing_information=["2023研发费用"]、recoverability=likely、
    failure_reason=insufficient_coverage；不能使用 missing_slot。
-3. Task：“Netflix gross margin history by year” Evidence：“只有 operating margin / EBITDA margin，
-   没有 annual gross margin。” query 已完整，因此 ambiguity=none、missing_slots=[]、
-   missing_information=["annual gross margin history"]、recoverability=likely、
-   failure_reason=insufficient_coverage；不能使用 missing_slot。
+ C. Task：“公司的利润是多少？”上下文明确存在营业利润、净利润、归母净利润三个
+    有限且合理的候选。此时 ambiguity=multiple_candidates、missing_slots=[]，不能使用
+    missing_slot。
+ D. Task：“A公司过去5年的员工流失率是多少？” Evidence：“只有2024年员工流失率为8%。”
+    query 已完整，但证据缺少其他年份，因此 ambiguity=none、missing_slots=[]、
+    missing_information=["过去其他年份的员工流失率"]、recoverability=likely、
+    failure_reason=insufficient_coverage；不能使用 missing_slot。
 
 不要使用任何 gold answer、expected label、评测标签或其他 task 的证据。只返回 EvidenceGrade 结构化结果。"""
 
