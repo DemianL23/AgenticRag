@@ -1413,6 +1413,139 @@ Module 6 is frozen。后续除 regression、explicit contract bug 或 Module 7 i
 - build/await 节点分离。
 - QueryRevision 与 affected-task resume。
 
+#### Module 7 Freeze Record
+
+Module 7（HITL Contract）状态：**FROZEN**。
+
+- Implementation baseline：`7a71956b3a2f128723c5e8b2567d14042a48e016`
+- Initial Module 7 implementation：`279e66debc5d3bcc8ed39c36bb4c66f5e3d99363`
+- Initial review：CHANGES REQUESTED；唯一 blocker 是 V2.2 waiting state 可被 in-memory resume。
+- Blocker fix：`7a71956b3a2f128723c5e8b2567d14042a48e016`
+- Final review：CODE REVIEW: PASS，BLOCKING ISSUES: 0
+
+Module 7 已完成 HITL resume application boundary、ResumeRequest validation、affected-task
+resolution、deterministic clarify/scope-select merge、新 QueryRevision、
+`user_clarified` RetrievalAttempt、current-revision-only Grade boundary、Module 5 Recovery
+reuse、affected-task-only continuation、unaffected Task/Finding preservation、HITL round and
+QueryRevision budget enforcement，以及 build/await separation。
+
+#### Frozen Stage Boundary
+
+- V2.2 的 `clarify` / `scope_select` 返回 `execution_status=waiting_user`、
+  `resumable=false` 和 structured `pending_hitl_request`；当前 run 结束。
+- V2.2 waiting state MUST NOT 通过 `HITLResumeService` resume。
+- Module 7 的 `HITLResumeService.resume()` 和 `await_user_input()` 只接受
+  `target_stage="v2_3"`；其它 stage 返回 `request_not_resumable`。
+- stage rejection 发生在 state mutation、budget mutation、QueryRevision creation、
+  Retrieval、Grader、Recovery、Finding 或 Synthesis 之前。
+- `initial_v2_3_state(...)` 只是最小的 non-persistent state initializer；Module 7 不实现
+  `graph_v2_3`。
+
+#### ResumeRequest Validation Contract
+
+ResumeRequest 必须满足：
+
+- `request_id == pending HITLRequest.request_id`；
+- `hitl_request_id == pending HITLRequest.id`；
+- responses 与 HITL items 一一对应，不缺少、不额外增加 response，且不重复 `item_id`。
+
+对于 `clarify`，`clarify_values` 必须存在且只能覆盖 `missing_slots`，每个 key/value 非空，
+并且不得携带 `selected_option_id`。对于 `scope_select`，`selected_option_id` 必须属于对应
+HITLItem 的 options，并且不得携带 `clarify_values`。
+
+非法 ResumeRequest 返回 `resume_payload_invalid` 或 `request_not_resumable`，并保证 zero
+mutation、zero budget consumption、zero Retrieval 和 zero model call；pending request 不被
+清除。
+
+#### Affected-task Resume Contract
+
+Resume 只处理 `pending_hitl_request.items[*].affected_task_ids`。未受影响 Task 的
+`query_revisions`、`retrieval_attempts`、`grade_records`、`routing_decisions`、
+`grounded_finding`、`execution_status`、`answer_outcome`、`terminal_reason` 和 `error` 必须
+保持不变；已有 GroundedFinding 不重新生成，也不重新调用 Router、Decomposer、Retrieval、
+Grade 或 Finding。
+
+HITL user input 由 Application / Policy 确定性合并，不调用 Router、Decomposer、rewrite 或
+HITL model。Clarify 将原 task/query semantic context 与 validated `clarify_values` 合并；
+scope select 使用所选 `ScopeOption.value`，不得将 option ID 或 Evidence ID 作为 query semantic
+value。
+
+#### QueryRevision and Retrieval Contract
+
+合法 Resume 为每个 affected Task 创建 append-only 的新 QueryRevision：
+
+- `source="hitl"`；
+- `ordinal` 为前一 revision ordinal + 1；
+- ID 使用现有 `query_revision_id(...)`；
+- 合法用户输入以 JSON-serializable 形式写入 `QueryRevision.user_input`。
+
+新的 revision 首次 RetrievalAttempt 使用 `ordinal=1`、`strategy="user_clarified"` 和属于新
+revision 的稳定 ID（例如 `ATT_SQ001_QR002_001`），不伪装成旧 revision 的 `ATT_003`。Module 7
+复用 `V12RetrievalBackend` / `V12RetrievalAdapter`，不修改 Module 3 initial retrieval contract。
+Evidence 以 `evidence_id=chunk_id` 全局 dedup，并 append 每个 revision/attempt 的
+EvidenceOccurrence。
+
+新 revision 的初始 Grade 只允许读取该 revision 的 ATT_001 Final Top-5；历史 Evidence 保留
+不等于可以混入当前 Grade 输入。若该 revision 进入 Recovery，则复用 frozen Module 5：当前
+revision ATT_001 ∪ ATT_002，dedup 后最多 10 条，不加入旧 revision Evidence，不创建 ATT_003。
+
+#### Budget and Outcome Contract
+
+- `V2_MAX_HITL_ROUNDS=1`；只有合法 Resume 被接受后 `hitl_rounds` 才增加，非法 Resume 不消耗预算。
+- 受影响 Task 使用 `V2_MAX_QUERY_REVISIONS`；baseline 为 QR_001 original 加最多 QR_002 HITL，
+  不创建 QR_003 或覆盖旧 revision。
+- 若唯一 HITL round 后再次出现 `clarify` / `scope_select`，不创建第二个 HITLRequest，Task
+  变为 `completed` / `unresolved`，`terminal_reason=hitl_budget_exhausted`。
+- `answer` 继续生成合法 GroundedFinding；`no_knowledge` 为 completed/no_knowledge；technical
+  failure 为 failed/null。Technical failure 不转换为 no_knowledge、unsupported 或 unresolved。
+- Resume 后复用 Module 6 的 `aggregate_task_outcomes(...)` 和 synthesis/provenance semantics；
+  新 Finding 只能引用当前 revision 最新合法 Grade 的 supporting Evidence。
+
+#### Pending HITL and Await Boundary
+
+`build_hitl_request` 与 `await_user_input` 是不同职责。前者构造 structured HITL payload，后者
+是无副作用的逻辑等待边界，不调用 LLM、Retrieval 或 `interrupt()`，不改变 budget，只接受
+`target_stage="v2_3"`。合法 Resume 被接受并处理后，`pending_hitl_request` 清除；非法 Resume
+保留 pending request。
+
+Module 7 不包含 `graph_v2_3`、LangGraph `interrupt()`、SQLite、checkpointer、persistence、
+`v2_requests` repository、TTL、lease、cleanup、durable duplicate-resume idempotency、
+checkpoint expiration/version migration、cross-process resume 或 durable status CLI；这些属于
+Module 8。
+
+#### Implementation Files
+
+Module 7 主要涉及：
+
+- `src/agenticrag/v2/hitl.py`
+- `src/agenticrag/v2/policies.py`
+- `src/agenticrag/v2/graph.py`（仅新增 minimal `initial_v2_3_state`，未实现 `graph_v2_3`）
+- `src/agenticrag/v2/__init__.py`
+- `tests/v2/test_module7_hitl.py`
+
+#### Local Validation
+
+- Module 7 targeted tests：19 passed
+- `tests/v2/`：124 passed
+- `tests/eval/v2/`：34 passed
+- Full suite：280 passed，1 个既有失败：
+  `tests/generation/test_generation.py::test_generation_config_reads_env_without_slots_descriptor_bug`
+- 上述失败属于已有 GenerationConfig dotenv environment pollution，本 Module 未修改 Generation
+  code。
+- `uv lock --check`：PASS
+- `python -m compileall -q src`：PASS
+- `git diff --check`：PASS
+- workspace：clean
+
+以上为 local validation；当前 GitHub commit 无可见 CI status。
+
+Module 7 is frozen。后续除 regression、explicit contract bug 或 Module 8 integration 所需的
+documented compatibility fix 外，不得静默改变 V2.2 non-resumable boundary、V2.3-only resume
+boundary、ResumeRequest validation、zero-mutation invalid resume、deterministic HITL merge、
+affected-task isolation、QueryRevision append-only semantics、`user_clarified` ATT_001、
+current-revision Grader boundary、Module 5 recovery reuse、HITL/QueryRevision budget、unaffected
+Finding preservation 或 Module 6 aggregation/provenance semantics。
+
 ### Module 8：SQLite Persistence
 
 - official LangGraph SQLite checkpointer。
