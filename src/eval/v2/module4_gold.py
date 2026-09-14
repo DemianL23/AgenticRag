@@ -482,7 +482,7 @@ def replay_module4_gold(
     run_id: str | None = None,
     output_root: Path = DEFAULT_OUTPUT_ROOT,
 ) -> dict[str, Any]:
-    config = config or V2Config()
+    config = config or V2Config.from_env()
     fixtures = load_gold_dataset(gold_path)
     grader = grader or EvidenceGrader(config)
     started = time.perf_counter()
