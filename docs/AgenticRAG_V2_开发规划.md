@@ -1292,6 +1292,26 @@ resolved config、模型 revision，以及运行时的 `git_commit` / `git_dirty
 
 V2.1 通过验收后才能进入 V2.2。
 
+#### Module 4 Freeze Record
+
+Module 4（Evidence Grader + Deterministic Routing）状态：**FROZEN**。
+
+- Implementation baseline：`aaab9d1e28b32738fff80a7ee4873e16f42c8ecb`
+- Gold dataset：`eval/datasets/v2_module4_grade_route_gold.jsonl`
+- Gold SHA256：`b2204ec505d76c3fd57dd060378ea0e9e5946482e4987b6b0b6c6a58ff1e594c`
+- Gold fixtures：14 tasks / 8 QA，`needs_review=0`
+- Replay run：`3a269ea6-c5bc-4e5e-800d-f881100dbf3c`
+- Replay：`grade_exact_match_accuracy=0.9286`，`route_accuracy=0.9286`，`recovery_strategy_accuracy=1.0000`
+- Replay：`technical_failure_count=0`，`invariant_violation_count=0`，`git_dirty=false`
+- Workflow integration run：`91778fa4-5b35-4728-b99d-5f3e0f1a87db`
+- Workflow integration：`technical_failure_count=0`，`degraded_retrieval_count=0`，`invariant_violation_count=0`
+
+已知限制：`M4G_indCN_00294_006` 存在唯一 semantic mismatch。Gold 保持
+`answer`，Production Grader 判定为 `recover/direct_rewrite`；该差异经人工审核为
+conservative false-recover，不属于 technical failure 或 RoutingPolicy 错误。Workflow
+integration 的 planning task 数量可能随 Router/Decomposer 输出变化；Module 4 的冻结
+语义评测以 frozen Task + Evidence replay 为准。
+
 ### Module 5：Recovery
 
 - 三种 Recovery artifact generator。
