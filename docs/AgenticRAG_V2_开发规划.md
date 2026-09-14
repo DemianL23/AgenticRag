@@ -1318,6 +1318,47 @@ integration 的 planning task 数量可能随 Router/Decomposer 输出变化；M
 - attempt budget、duplicate query validator。
 - re-retrieval 与同 revision Evidence union/re-grade。
 
+#### Module 5 Freeze Record
+
+Module 5（Bounded Recovery）状态：**FROZEN**。
+
+- Implementation baseline：`5f9a1732fc846a6c5bc9e85a8764e909c15ccfbd`
+- Recovery strategy 由 deterministic RoutingPolicy 决定，Rewrite Model 不选择 strategy。
+- Frozen mapping：`irrelevant_evidence` / `insufficient_coverage` / `query_mismatch` → `direct_rewrite`；
+  `overly_specific` → `step_back`；`terminology_gap` → `hyde`。
+- Rewrite role：`DecisionModelConfig.rewrite`。
+- Recovery 不创建新的 QueryRevision；direct rewrite、step-back 和 HyDE 都只创建当前
+  QueryRevision 下的第二次 RetrievalAttempt。每个 QueryRevision 最多 2 次 attempt，不存在
+  `ATT_003`，也不允许动态换 strategy、Reflection、Replanning 或开放式 retry。
+- duplicate / invalid recovery artifact 最终统一为 technical failure：
+  `invalid_recovery_artifact`；duplicate query 原因保留在
+  `details["reason"]="duplicate_query"`。
+- Attempt 2 继续通过现有 V1.2 `V12RetrievalBackend` / adapter 执行。
+- Recovery 后 Re-grade 输入为 Attempt 1 Final Top-5 ∪ Attempt 2 Final Top-5；同一
+  QueryRevision 内按 stable Evidence ID / `chunk_id` 去重，最多 10 条。不合并 candidate
+  pool、RRF Top-20、其他 task Evidence 或旧 QueryRevision Evidence；Evidence occurrence
+  provenance 必须保留。
+- HyDE artifact 明确 `is_evidence=false`，不得进入 Evidence、supporting evidence 或 citation。
+- GradeRecord 和 RoutingDecision append-only。Recovery 后 retrieval budget 已耗尽时，即使
+  再次 `recoverability=likely`，也不得再次 recover；按 frozen RoutingPolicy 进入后续合法终止
+  route。technical failure 不得转换为 `no_knowledge`。
+
+Local validation：
+
+- `tests/v2/`：85 passed
+- `tests/eval/v2/`：32 passed
+- Full suite：239 passed，1 个既有失败：
+  `tests/generation/test_generation.py::test_generation_config_reads_env_without_slots_descriptor_bug`
+- 上述失败属于已有 GenerationConfig dotenv 环境污染问题，本 Module 未修改 Generation 代码。
+- `uv lock --check`：pass
+- `python -m compileall -q src`：pass
+- `git diff --check`：pass
+
+Scope boundary：Module 5 只冻结 Recovery execution contract，不包含 GroundedFinding、Answer
+Generation、Final Synthesis、Final Answer、Citation rendering、V2.2 完整 Graph、V2.2 CLI、HITL
+或 Persistence；这些由后续 Module 继续实现。本 Module 没有单独的 real-model benchmark、Gold
+dataset 或 recovery quality baseline。
+
 ### Module 6：GroundedFinding 与 Answer Synthesis
 
 - simple single-call adapter。
