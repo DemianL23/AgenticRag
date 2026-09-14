@@ -71,10 +71,18 @@ class StaticGrader:
 
 
 class SequenceStructuredModel:
-    def __init__(self, outputs: list[object]) -> None:
+    def __init__(
+        self,
+        outputs: list[object],
+        *,
+        events: list[str] | None = None,
+        label: str = "model",
+    ) -> None:
         self.outputs = list(outputs)
         self.calls = 0
         self.prompts: list[str] = []
+        self.events = events
+        self.label = label
 
     def with_structured_output(self, schema: object) -> "SequenceStructuredModel":
         return self
@@ -82,6 +90,8 @@ class SequenceStructuredModel:
     def invoke(self, prompt: str) -> object:
         self.calls += 1
         self.prompts.append(prompt)
+        if self.events is not None:
+            self.events.append(self.label)
         output = self.outputs.pop(0)
         if isinstance(output, Exception):
             raise output
@@ -513,6 +523,282 @@ def test_mixed_answer_and_scope_select_preserves_answer_finding_before_waiting()
     assert result.stage_result.pending_hitl_request is not None
     assert result.stage_result.pending_hitl_request.items[0].action == "scope_select"
     assert finding_model.calls == 1
+
+
+def test_mixed_answer_and_clarify_hitl_failure_preserves_healthy_finding() -> None:
+    grader = StaticGrader([
+        _grade("evidence-A"),
+        _grade(
+            answerability="none",
+            supporting=[],
+            ambiguity="missing_slot",
+            missing_slots=["year"],
+        ),
+    ])
+    events: list[str] = []
+    finding_model = SequenceStructuredModel(
+        [{"text": "finding A", "evidence_ids": ["evidence-A"]}],
+        events=events,
+        label="finding",
+    )
+    hitl_model = SequenceStructuredModel([{}, {}], events=events, label="hitl")
+    synthesis_model = SequenceStructuredModel(
+        [{"answer": "partial answer", "citation_evidence_ids": ["evidence-A"]}],
+        events=events,
+        label="synthesis",
+    )
+
+    _, result = _run_service(
+        _complex_plan("A", "B"),
+        grader,
+        finding_model,
+        synthesis_model=synthesis_model,
+        hitl_model=hitl_model,
+    )
+
+    tasks = {task.id: task for task in result.tasks}
+    assert tasks["SQ_001"].grounded_finding is not None
+    assert tasks["SQ_001"].execution_status == "completed"
+    assert tasks["SQ_002"].execution_status == "failed"
+    assert tasks["SQ_002"].answer_outcome is None
+    assert tasks["SQ_002"].error is not None
+    assert tasks["SQ_002"].error.code == "hitl_generation_failed"
+    assert hitl_model.calls == 2
+    assert events == ["finding", "hitl", "hitl", "synthesis"]
+    assert result.stage_result.answer_outcome == "partial"
+
+
+def test_mixed_answer_and_scope_hitl_failure_preserves_healthy_finding() -> None:
+    grader = StaticGrader([
+        _grade("evidence-A"),
+        _grade(answerability="none", supporting=[], ambiguity="multiple_candidates"),
+    ])
+    events: list[str] = []
+    finding_model = SequenceStructuredModel(
+        [{"text": "finding A", "evidence_ids": ["evidence-A"]}],
+        events=events,
+        label="finding",
+    )
+    invalid_scope = {
+        "options": [
+            {
+                "label": "bad A",
+                "value": "evidence-B",
+                "description": "invalid raw evidence value",
+                "evidence_ids": [],
+            },
+            {
+                "label": "bad B",
+                "value": "other",
+                "description": "second invalid response",
+                "evidence_ids": ["evidence-B"],
+            },
+        ]
+    }
+    hitl_model = SequenceStructuredModel(
+        [invalid_scope, invalid_scope], events=events, label="hitl"
+    )
+    synthesis_model = SequenceStructuredModel(
+        [{"answer": "partial answer", "citation_evidence_ids": ["evidence-A"]}],
+        events=events,
+        label="synthesis",
+    )
+
+    _, result = _run_service(
+        _complex_plan("A", "B"),
+        grader,
+        finding_model,
+        synthesis_model=synthesis_model,
+        hitl_model=hitl_model,
+    )
+
+    tasks = {task.id: task for task in result.tasks}
+    assert tasks["SQ_001"].grounded_finding is not None
+    assert tasks["SQ_001"].execution_status == "completed"
+    assert tasks["SQ_002"].execution_status == "failed"
+    assert tasks["SQ_002"].answer_outcome is None
+    assert hitl_model.calls == 2
+    assert events == ["finding", "hitl", "hitl", "synthesis"]
+    assert result.stage_result.answer_outcome == "partial"
+
+
+def test_scope_semantic_invalid_value_repairs_once() -> None:
+    grade = _grade(answerability="none", supporting=[], ambiguity="multiple_candidates")
+    planner = _simple_plan()
+    invalid = {
+        "options": [
+            {
+                "label": "raw",
+                "value": "evidence-question",
+                "description": "raw ID is not semantic content",
+                "evidence_ids": [],
+            },
+            {
+                "label": "other",
+                "value": "other metric",
+                "description": "another candidate",
+                "evidence_ids": ["evidence-question"],
+            },
+        ]
+    }
+    valid = {
+        "options": [
+            {
+                "label": "营业利润",
+                "value": "operating profit",
+                "description": "营业利润口径",
+                "evidence_ids": [],
+            },
+            {
+                "label": "净利润",
+                "value": "net profit",
+                "description": "净利润口径",
+                "evidence_ids": ["evidence-question"],
+            },
+        ]
+    }
+    hitl_model = SequenceStructuredModel([invalid, valid])
+    _, result = _run_service(
+        planner,
+        StaticGrader([grade]),
+        SequenceStructuredModel([]),
+        hitl_model=hitl_model,
+    )
+
+    item = result.stage_result.pending_hitl_request.items[0]
+    assert hitl_model.calls == 2
+    assert {option.value for option in item.scope_options} == {
+        "operating profit",
+        "net profit",
+    }
+    assert [option.id for option in item.scope_options] == ["OPT_001", "OPT_002"]
+
+
+def test_scope_semantic_unknown_evidence_repairs_once() -> None:
+    grade = _grade(answerability="none", supporting=[], ambiguity="multiple_candidates")
+    invalid = {
+        "options": [
+            {
+                "label": "A",
+                "value": "metric A",
+                "description": "candidate A",
+                "evidence_ids": ["not-in-task"],
+            },
+            {
+                "label": "B",
+                "value": "metric B",
+                "description": "candidate B",
+                "evidence_ids": ["evidence-question"],
+            },
+        ]
+    }
+    valid = {
+        "options": [
+            {
+                "label": "A",
+                "value": "metric A",
+                "description": "candidate A",
+                "evidence_ids": [],
+            },
+            {
+                "label": "B",
+                "value": "metric B",
+                "description": "candidate B",
+                "evidence_ids": ["evidence-question"],
+            },
+        ]
+    }
+    hitl_model = SequenceStructuredModel([invalid, valid])
+    _, result = _run_service(
+        _simple_plan(),
+        StaticGrader([grade]),
+        SequenceStructuredModel([]),
+        hitl_model=hitl_model,
+    )
+
+    assert result.stage_result.execution_status == "waiting_user"
+    assert hitl_model.calls == 2
+
+
+def test_scope_duplicate_semantic_values_repair_once() -> None:
+    grade = _grade(answerability="none", supporting=[], ambiguity="multiple_candidates")
+    duplicate = {
+        "options": [
+            {
+                "label": "A1",
+                "value": "same metric",
+                "description": "duplicate candidate one",
+                "evidence_ids": [],
+            },
+            {
+                "label": "A2",
+                "value": " SAME METRIC ",
+                "description": "duplicate candidate two",
+                "evidence_ids": [],
+            },
+        ]
+    }
+    valid = {
+        "options": [
+            {
+                "label": "A",
+                "value": "metric A",
+                "description": "candidate A",
+                "evidence_ids": [],
+            },
+            {
+                "label": "B",
+                "value": "metric B",
+                "description": "candidate B",
+                "evidence_ids": [],
+            },
+        ]
+    }
+    hitl_model = SequenceStructuredModel([duplicate, valid])
+    _, result = _run_service(
+        _simple_plan(),
+        StaticGrader([grade]),
+        SequenceStructuredModel([]),
+        hitl_model=hitl_model,
+    )
+
+    assert result.stage_result.execution_status == "waiting_user"
+    assert hitl_model.calls == 2
+
+
+def test_scope_semantic_invalid_twice_is_technical_failure() -> None:
+    grade = _grade(answerability="none", supporting=[], ambiguity="multiple_candidates")
+    invalid = {
+        "options": [
+            {
+                "label": "raw",
+                "value": "evidence-question",
+                "description": "invalid raw ID",
+                "evidence_ids": [],
+            },
+            {
+                "label": "other",
+                "value": "other metric",
+                "description": "candidate",
+                "evidence_ids": ["evidence-question"],
+            },
+        ]
+    }
+    hitl_model = SequenceStructuredModel([invalid, invalid])
+    _, result = _run_service(
+        _simple_plan(),
+        StaticGrader([grade]),
+        SequenceStructuredModel([]),
+        hitl_model=hitl_model,
+    )
+
+    task = result.tasks[0]
+    assert hitl_model.calls == 2
+    assert task.execution_status == "failed"
+    assert task.answer_outcome is None
+    assert task.error is not None
+    assert task.error.code == "hitl_generation_failed"
+    assert result.stage_result.execution_status == "failed"
 
 
 def test_recovery_integration_creates_attempt_two_then_finding() -> None:

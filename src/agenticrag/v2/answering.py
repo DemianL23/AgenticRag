@@ -200,6 +200,7 @@ class HITLContentGenerator:
         task: RetrievalTask,
         grade: EvidenceGrade,
         evidence: Sequence[Evidence],
+        max_scope_options: int,
         response_language: ResponseLanguage,
     ) -> tuple[list[ScopeOptionPayload], int]:
         prompt = build_hitl_scope_prompt(
@@ -208,6 +209,15 @@ class HITLContentGenerator:
             evidence=evidence,
             response_language=response_language,
         )
+        allowed_ids = {item.evidence_id for item in evidence}
+
+        def validate_payload(payload: ScopeOptionsPayload) -> None:
+            _validate_scope_payload(
+                payload.options,
+                allowed_evidence_ids=allowed_ids,
+                max_scope_options=max_scope_options,
+            )
+
         try:
             payload, attempts = _invoke_structured(
                 self._model or create_decision_chat_model(self.config.decision_models.hitl),
@@ -215,6 +225,8 @@ class HITLContentGenerator:
                 prompt,
                 role="hitl",
                 retry_policy=self.config.decision_models.hitl.retry_policy,
+                post_validate=validate_payload,
+                repair_prompt_builder=_build_hitl_repair_prompt,
             )
         except PlanningError as exc:
             raise HITLGenerationError(attempts=exc.attempts, cause=exc) from exc
@@ -630,6 +642,7 @@ def build_hitl_request(
                 task=task,
                 grade=grade,
                 evidence=current_evidence_by_task[task.id],
+                max_scope_options=max_scope_options,
                 response_language=response_language,
             )
             options, option_ordinal = _materialize_scope_options(
@@ -676,8 +689,6 @@ def _materialize_scope_options(
         unknown = set(payload.evidence_ids) - valid_evidence_ids
         if unknown:
             raise ValueError(f"ScopeOption 引用了当前 task 之外的 Evidence：{sorted(unknown)}")
-        if not payload.evidence_ids:
-            raise ValueError("ScopeOption 必须带有对应 task 的 Evidence provenance")
         existing = by_value.get(value_key)
         if existing is None:
             by_value[value_key] = payload
@@ -719,6 +730,43 @@ def _materialize_scope_options(
         )
         ordinal += 1
     return options, ordinal
+
+
+def _validate_scope_payload(
+    payloads: Sequence[ScopeOptionPayload],
+    *,
+    allowed_evidence_ids: set[str],
+    max_scope_options: int,
+) -> None:
+    if not 2 <= len(payloads) <= max_scope_options:
+        raise ValueError("scope_select 候选数量必须在 2 到配置上限之间")
+    normalized_evidence_ids = {
+        normalize_query(item).casefold() for item in allowed_evidence_ids
+    }
+    normalized_values: list[str] = []
+    for payload in payloads:
+        value_key = normalize_query(payload.value).casefold()
+        if value_key in normalized_evidence_ids:
+            raise ValueError("ScopeOption value 不能直接使用 raw Evidence ID")
+        unknown = set(payload.evidence_ids) - allowed_evidence_ids
+        if unknown:
+            raise ValueError(
+                f"ScopeOption 引用了当前 task 之外的 Evidence：{sorted(unknown)}"
+            )
+        normalized_values.append(value_key)
+    if len(normalized_values) != len(set(normalized_values)):
+        raise ValueError("ScopeOption semantic value 不得重复")
+
+
+def _build_hitl_repair_prompt(original_prompt: str, cause: Exception) -> str:
+    return (
+        f"{original_prompt}\n\n"
+        "上一轮 HITL scope output 未通过 semantic contract。请重新生成完整 options 对象，"
+        "不要输出 patch、ID、route 或 execution status。"
+        f"\nFailure type: {type(cause).__name__}"
+        f"\nFailure: {_safe_exception_message(cause)}"
+        "\n每个 value 必须是用户可理解的候选范围；evidence_ids 必须逐字复制当前 task 输入 Evidence 的 ID。"
+    )
 
 
 def _evidence_record(item: Evidence) -> dict[str, object]:

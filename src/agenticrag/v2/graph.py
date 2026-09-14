@@ -402,11 +402,15 @@ def build_graph_v2_2(
     workflow.add_node("recover", lambda state: _recover_node(state, recovery))
     workflow.add_node(
         "terminalize_routes",
-        lambda state: _terminalize_routes_node(
+        _terminalize_routes_node,
+    )
+    workflow.add_node("generate_findings", lambda state: _finding_node(state, finding))
+    workflow.add_node(
+        "build_hitl_request",
+        lambda state: _build_hitl_request_node(
             state, config, hitl, state["response_language"]
         ),
     )
-    workflow.add_node("generate_findings", lambda state: _finding_node(state, finding))
     workflow.add_node("aggregate_outcomes", _aggregate_node)
     workflow.add_node("simple_answer", lambda state: _simple_answer_node(state))
     workflow.add_node("synthesize", lambda state: _synthesis_node(state, synthesis))
@@ -442,11 +446,12 @@ def build_graph_v2_2(
     workflow.add_conditional_edges(
         "terminalize_routes",
         _continue_after_terminalize_v22,
-        {"waiting": "waiting_finalize", "findings": "generate_findings"},
+        {"waiting": "build_hitl_request", "findings": "generate_findings"},
     )
+    workflow.add_edge("generate_findings", "build_hitl_request")
     workflow.add_conditional_edges(
-        "generate_findings",
-        _continue_after_findings_v22,
+        "build_hitl_request",
+        _continue_after_hitl_v22,
         {"waiting": "waiting_finalize", "aggregate": "aggregate_outcomes"},
     )
     workflow.add_edge("waiting_finalize", "stage_finalize")
@@ -492,7 +497,7 @@ def _continue_after_terminalize_v22(
     return "waiting" if state["execution_status"] == "waiting_user" else "findings"
 
 
-def _continue_after_findings_v22(
+def _continue_after_hitl_v22(
     state: V2State,
 ) -> Literal["waiting", "aggregate"]:
     return "waiting" if state.get("pending_hitl_request") is not None else "aggregate"
@@ -562,12 +567,7 @@ def _recover_node(state: V2State, recovery: RecoveryService) -> dict[str, object
     return output
 
 
-def _terminalize_routes_node(
-    state: V2State,
-    config: V2Config,
-    hitl: HITLContentGenerator,
-    response_language: str,
-) -> dict[str, object]:
+def _terminalize_routes_node(state: V2State) -> dict[str, object]:
     task_updates: dict[str, RetrievalTask] = {}
     waiting_tasks: dict[str, RetrievalTask] = {}
     first_error: ExecutionError | None = None
@@ -613,44 +613,61 @@ def _terminalize_routes_node(
             first_error = first_error or error
 
     output: dict[str, object] = {"tasks": task_updates}
-    if waiting_tasks:
-        merged_tasks = dict(state.get("tasks", {}))
-        merged_tasks.update(task_updates)
-        try:
-            pending = build_hitl_request(
-                request_id=state["request_id"],
-                tasks=merged_tasks,
-                evidence_by_id=state.get("evidence", {}),
-                max_scope_options=config.budgets.max_scope_options,
-                response_language=response_language,
-                generator=hitl,
-            )
-            output["pending_hitl_request"] = pending
-            if not any(
-                task.execution_status != "failed"
-                and task.routing_decisions
-                and task.routing_decisions[-1].route == "answer"
-                for task in task_updates.values()
-            ):
-                output["execution_status"] = "waiting_user"
-        except Exception as exc:
-            error = ExecutionError(
-                code="hitl_payload_invalid",
-                message="V2.2 waiting payload generation failed",
-                stage="module6_terminalize",
-                details={"exception_type": type(exc).__name__},
-            )
-            output["tasks"] = {
-                task_id: task.model_copy(
-                    update={"execution_status": "failed", "answer_outcome": None, "error": error}
-                )
-                for task_id, task in task_updates.items()
-            }
-            output["execution_status"] = "running"
-            first_error = first_error or error
+    if waiting_tasks and not any(
+        task.execution_status != "failed"
+        and task.routing_decisions
+        and task.routing_decisions[-1].route == "answer"
+        for task in task_updates.values()
+    ):
+        output["execution_status"] = "waiting_user"
     if first_error is not None:
         output["error"] = first_error
     return output
+
+
+def _build_hitl_request_node(
+    state: V2State,
+    config: V2Config,
+    hitl: HITLContentGenerator,
+    response_language: str,
+) -> dict[str, object]:
+    waiting_tasks = {
+        task.id: task
+        for task in _ordered_tasks(state)
+        if task.routing_decisions
+        and task.routing_decisions[-1].route in {"clarify", "scope_select"}
+        and task.execution_status != "failed"
+    }
+    if not waiting_tasks:
+        return {}
+    try:
+        pending = build_hitl_request(
+            request_id=state["request_id"],
+            tasks={**state.get("tasks", {}), **waiting_tasks},
+            evidence_by_id=state.get("evidence", {}),
+            max_scope_options=config.budgets.max_scope_options,
+            response_language=response_language,
+            generator=hitl,
+        )
+        return {"pending_hitl_request": pending, "execution_status": "waiting_user"}
+    except Exception as exc:
+        error = getattr(exc, "execution_error", None) or ExecutionError(
+            code="hitl_payload_invalid",
+            message="V2.2 waiting payload generation failed",
+            stage="module6_hitl",
+            details={"exception_type": type(exc).__name__},
+        )
+        failed_updates = {
+            task_id: task.model_copy(
+                update={
+                    "execution_status": "failed",
+                    "answer_outcome": None,
+                    "error": error,
+                }
+            )
+            for task_id, task in waiting_tasks.items()
+        }
+        return {"tasks": failed_updates, "execution_status": "running", "error": error}
 
 
 def _waiting_finalize_node(state: V2State) -> dict[str, object]:
