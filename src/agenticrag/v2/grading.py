@@ -28,6 +28,10 @@ EVIDENCE_GRADER_SYSTEM_PROMPT = """你是 Agentic RAG V2 的 Evidence Grader。
 
 严格规则：
 - supporting_evidence_ids 只能引用本次输入的 Evidence ID，不得编造 ID。
+- allowed_supporting_evidence_ids 是唯一合法 ID 列表；supporting_evidence_ids 必须从中逐字复制 exact ID。
+  不允许改写、缩写、重建或猜测 Evidence ID。请复制 supporting_evidence_ids exactly from
+  allowed_supporting_evidence_ids，不要自行构造 Evidence ID。 Copy supporting_evidence_ids exactly from
+  allowed_supporting_evidence_ids. Never construct an Evidence ID yourself.
 - answerability=sufficient 或 partial 时至少引用一条 supporting evidence。
 - answerability=none 时 supporting_evidence_ids 必须为空。
 - relevance=none 时不能为 sufficient。
@@ -127,6 +131,7 @@ class EvidenceGrader:
                 role="grader",
                 retry_policy=self.config.decision_models.grader.retry_policy,
                 post_validate=lambda value: value.validate_against_evidence_ids(evidence_ids),
+                repair_prompt_builder=_build_grader_repair_prompt,
             )
         except PlanningError as exc:
             raise EvidenceGradingError(
@@ -141,6 +146,7 @@ def build_evidence_grader_prompt(
     *, task: RetrievalTask, revision: QueryRevision, evidence: list[Evidence]
 ) -> str:
     """Build a bounded prompt with no diagnostics or evaluation labels."""
+    evidence_ids_in_input = [item.evidence_id for item in evidence]
     evidence_payload = [
         {
             "evidence_id": item.evidence_id,
@@ -160,8 +166,22 @@ def build_evidence_grader_prompt(
             "query": revision.query,
         },
         "final_top5_evidence": evidence_payload,
+        "allowed_supporting_evidence_ids": evidence_ids_in_input,
     }
     return f"{EVIDENCE_GRADER_SYSTEM_PROMPT}\n\n输入：\n{json.dumps(context, ensure_ascii=False, indent=2)}"
+
+
+def _build_grader_repair_prompt(original_prompt: str, cause: Exception) -> str:
+    """Append bounded, sanitized contract feedback for the one repair attempt."""
+    return (
+        f"{original_prompt}\n\n"
+        "上一轮输出违反了 EvidenceGrade structured contract。请重新生成完整的 EvidenceGrade 对象，"
+        "不要输出 patch、route 或 recovery strategy。保持对 task 与 evidence 的事实判断不变。\n"
+        f"Failure type: {type(cause).__name__}\n"
+        f"Failure: {_safe_exception_message(cause)}\n"
+        "修复要求：supporting_evidence_ids 只能逐字复制输入中的 "
+        "allowed_supporting_evidence_ids；answerability=none 时必须返回 []。"
+    )
 
 
 _MAX_DIAGNOSTIC_MESSAGE_LENGTH = 2000

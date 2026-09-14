@@ -176,6 +176,7 @@ def _invoke_structured(
     role: str,
     retry_policy: Any,
     post_validate: Callable[[SchemaT], None] | None = None,
+    repair_prompt_builder: Callable[[str, Exception], str] | None = None,
 ) -> tuple[SchemaT, int]:
     try:
         structured: StructuredRunnable = model.with_structured_output(schema)
@@ -183,9 +184,10 @@ def _invoke_structured(
         raise PlanningError(role=role, attempts=0, cause=exc) from exc
 
     max_attempts = retry_policy.max_attempts
+    current_prompt = prompt
     for attempt in range(1, max_attempts + 1):
         try:
-            parsed = schema.model_validate(structured.invoke(prompt))
+            parsed = schema.model_validate(structured.invoke(current_prompt))
             if post_validate is not None:
                 try:
                     post_validate(parsed)
@@ -194,6 +196,12 @@ def _invoke_structured(
             return parsed, attempt
         except Exception as exc:
             if attempt < max_attempts and _retryable(exc, retry_policy):
+                if (
+                    attempt == 1
+                    and repair_prompt_builder is not None
+                    and _is_structured_output_failure(exc)
+                ):
+                    current_prompt = repair_prompt_builder(prompt, exc)
                 continue
             raise PlanningError(role=role, attempts=attempt, cause=exc) from exc
     raise AssertionError("unreachable")
@@ -213,6 +221,13 @@ def _retryable(exc: Exception, retry_policy: Any) -> bool:
     if any(token in message for token in ("structured", "schema", "parse", "json")):
         return retry_policy.retry_structured_output
     return False
+
+
+def _is_structured_output_failure(exc: Exception) -> bool:
+    if isinstance(exc, (ValidationError, StructuredOutputContractError)):
+        return True
+    message = str(exc).lower()
+    return any(token in message for token in ("structured", "schema", "parse", "json"))
 
 
 def create_decision_chat_model(config: DecisionModelConfig) -> Any:

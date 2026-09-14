@@ -9,6 +9,7 @@ from agenticrag.v2.grading import (
     EVIDENCE_GRADER_SYSTEM_PROMPT,
     EvidenceGrader,
     EvidenceGradingError,
+    build_evidence_grader_prompt,
 )
 from agenticrag.v2.graph import build_graph_v2_1
 from agenticrag.v2.module4 import (
@@ -111,13 +112,18 @@ class SequenceStructuredModel:
     def __init__(self, outputs: list[object]) -> None:
         self.outputs = outputs
         self.calls = 0
+        self.prompts: list[str] = []
 
     def with_structured_output(self, schema: object) -> "SequenceStructuredModel":
         return self
 
     def invoke(self, prompt: str) -> object:
         self.calls += 1
-        return self.outputs.pop(0)
+        self.prompts.append(prompt)
+        output = self.outputs.pop(0)
+        if isinstance(output, Exception):
+            raise output
+        return output
 
 
 class RaisingStructuredModel:
@@ -321,6 +327,9 @@ def test_grader_prompt_is_scoped_to_current_task_and_final_evidence() -> None:
     prompt = model.prompts[0]
     assert "fact for question" in prompt
     assert "final_top5_evidence" in prompt
+    assert '"allowed_supporting_evidence_ids"' in prompt
+    assert '"question-evidence"' in prompt
+    assert "Copy supporting_evidence_ids exactly from" in prompt
     assert "candidate_pool" not in prompt
     assert "rrf_top20" not in prompt
     assert "expected.route" not in prompt
@@ -334,6 +343,29 @@ def test_grader_prompt_is_scoped_to_current_task_and_final_evidence() -> None:
     assert "Netflix gross margin history by year" not in prompt
     assert "Netflix gross margin history by year" not in EVIDENCE_GRADER_SYSTEM_PROMPT
     assert result.tasks[0].grade_records[0].input_evidence_ids == ["question-evidence"]
+
+
+def test_grader_allowed_ids_are_exactly_the_current_evidence_projection() -> None:
+    task, revision, evidence = _grader_input("完整问题", "证据 1")
+    extra_evidence = [
+        evidence[0].model_copy(
+            update={"evidence_id": evidence_id, "chunk_id": evidence_id}
+        )
+        for evidence_id in ("e1", "e2", "e3")
+    ]
+    attempt = revision.retrieval_attempts[0].model_copy(
+        update={"evidence_ids": ["e1", "e2", "e3"]}
+    )
+    revision = revision.model_copy(update={"retrieval_attempts": [attempt]})
+
+    prompt = build_evidence_grader_prompt(
+        task=task, revision=revision, evidence=extra_evidence
+    )
+
+    assert '"allowed_supporting_evidence_ids": [\n    "e1",\n    "e2",\n    "e3"\n  ]' in prompt
+    assert "candidate_pool" not in prompt
+    assert "rrf_top20" not in prompt
+    assert "expected.route" not in prompt
 
 
 def test_true_missing_slot_routes_to_clarify() -> None:
@@ -633,6 +665,94 @@ def test_grader_retry_count_remains_two_and_retry_can_succeed() -> None:
 
     assert attempts == 2
     assert model.calls == 2
+
+
+def test_grader_repair_retry_uses_safe_contract_feedback_and_allowed_ids() -> None:
+    task, revision, evidence = _grader_input("完整问题", "证据")
+    model = SequenceStructuredModel(
+        [{**_grade(), "supporting_evidence_ids": ["not-input"]},
+         _grade(supporting_evidence_ids=["evidence-1"])]
+    )
+
+    grade, attempts = EvidenceGrader(V2Config(), model=model).grade(
+        task=task, revision=revision, evidence=evidence
+    )
+
+    assert grade.supporting_evidence_ids == ["evidence-1"]
+    assert attempts == 2
+    assert model.calls == 2
+    repair_prompt = model.prompts[1]
+    assert "StructuredOutputContractError" in repair_prompt
+    assert "not-input" in repair_prompt
+    assert "allowed_supporting_evidence_ids" in repair_prompt
+    assert "evidence-1" in repair_prompt
+
+
+def test_grader_first_valid_attempt_does_not_send_repair_prompt() -> None:
+    task, revision, evidence = _grader_input("完整问题", "证据")
+    model = SequenceStructuredModel([_grade(supporting_evidence_ids=["evidence-1"])])
+
+    _grade_result, attempts = EvidenceGrader(V2Config(), model=model).grade(
+        task=task, revision=revision, evidence=evidence
+    )
+
+    assert attempts == 1
+    assert model.calls == 1
+    assert len(model.prompts) == 1
+    assert "上一轮输出违反" not in model.prompts[0]
+
+
+def test_grader_two_invalid_attempts_keep_structured_failure_diagnostics() -> None:
+    task, revision, evidence = _grader_input("完整问题", "证据")
+    model = SequenceStructuredModel([
+        {**_grade(), "supporting_evidence_ids": ["not-input"]},
+        {**_grade(), "supporting_evidence_ids": ["still-not-input"]},
+    ])
+
+    with pytest.raises(EvidenceGradingError) as raised:
+        EvidenceGrader(V2Config(), model=model).grade(
+            task=task, revision=revision, evidence=evidence
+        )
+
+    details = raised.value.execution_error.details
+    assert model.calls == 2
+    assert details["attempts"] == "2"
+    assert details["root_cause_type"] == "StructuredOutputContractError"
+    assert "still-not-input" in details["root_cause_message"]
+
+
+def test_grader_schema_validation_failure_can_repair_on_second_attempt() -> None:
+    task, revision, evidence = _grader_input("完整问题", "证据")
+    model = SequenceStructuredModel([
+        _grade(answerability="none"),
+        _grade(supporting_evidence_ids=["evidence-1"]),
+    ])
+
+    grade, attempts = EvidenceGrader(V2Config(), model=model).grade(
+        task=task, revision=revision, evidence=evidence
+    )
+
+    assert grade.answerability == "sufficient"
+    assert attempts == 2
+    assert model.calls == 2
+    assert "ValidationError" in model.prompts[1]
+    assert "answerability=none" in model.prompts[1]
+
+
+def test_grader_transient_retry_keeps_original_prompt() -> None:
+    task, revision, evidence = _grader_input("完整问题", "证据")
+    model = SequenceStructuredModel([
+        TimeoutError("provider timeout"),
+        _grade(supporting_evidence_ids=["evidence-1"]),
+    ])
+
+    _grade_result, attempts = EvidenceGrader(V2Config(), model=model).grade(
+        task=task, revision=revision, evidence=evidence
+    )
+
+    assert attempts == 2
+    assert model.calls == 2
+    assert "上一轮输出违反" not in model.prompts[1]
 
 
 def test_complex_graph_is_stable_and_deduplicates_occurrences() -> None:
