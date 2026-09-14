@@ -1,4 +1,4 @@
-"""Explicit non-persistent LangGraph workflows for V2.1 and V2.2."""
+"""Explicit non-persistent LangGraph workflows for V2.1, V2.2, and V2.3 state."""
 
 from __future__ import annotations
 
@@ -65,10 +65,26 @@ def initial_v2_2_state(
     )
 
 
+def initial_v2_3_state(
+    question: str,
+    *,
+    request_id: str | None = None,
+    response_language: str | None = None,
+) -> V2State:
+    """Create the minimal non-persistent state accepted by Module 7 resume."""
+
+    return _initial_state(
+        question,
+        target_stage="v2_3",
+        request_id=request_id,
+        response_language=response_language,
+    )
+
+
 def _initial_state(
     question: str,
     *,
-    target_stage: Literal["v2_1", "v2_2"],
+    target_stage: Literal["v2_1", "v2_2", "v2_3"],
     request_id: str | None,
     response_language: str | None,
 ) -> V2State:

@@ -6,6 +6,7 @@ from .planning import PlanningError, PlanningResult, PlanningService, plan
 from .grading import EvidenceGrader, EvidenceGradingError
 from .graph import build_graph_v2_1, initial_v2_1_state
 from .graph import build_graph_v2_2, initial_v2_2_state
+from .graph import initial_v2_3_state
 from .answering import (
     AnswerGenerationError,
     FindingGenerator,
@@ -71,6 +72,7 @@ __all__ = [
     "initial_v2_1_state",
     "build_graph_v2_2",
     "initial_v2_2_state",
+    "initial_v2_3_state",
     "AnswerGenerationError",
     "FindingGenerator",
     "HITLContentGenerator",

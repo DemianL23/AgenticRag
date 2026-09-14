@@ -84,6 +84,11 @@ def await_user_input(state: V2State) -> dict[str, object]:
     logical boundary that Module 8 can later wrap with a durable await node.
     """
 
+    if state.get("target_stage") != "v2_3":
+        raise HITLResumeError(
+            code="request_not_resumable",
+            message="await_user_input 只接受 target_stage=v2_3 的 state",
+        )
     if state.get("execution_status") != "waiting_user":
         raise HITLResumeError(
             code="request_not_resumable",
@@ -130,6 +135,12 @@ class HITLResumeService:
         revision or calling retrieval, grading, recovery, or answer models.
         The input mapping and its domain objects are never mutated in place.
         """
+
+        if state.get("target_stage") != "v2_3":
+            raise HITLResumeError(
+                code="request_not_resumable",
+                message="HITL resume 只接受 target_stage=v2_3 的 state",
+            )
 
         pending = state.get("pending_hitl_request")
         if state.get("execution_status") != "waiting_user" or pending is None:

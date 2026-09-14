@@ -27,7 +27,7 @@ from agenticrag.v2.schemas import (
 )
 from agenticrag.v2.serialization import serialize_state
 from agenticrag.v2.state import V2State
-from agenticrag.v2.graph import initial_v2_2_state
+from agenticrag.v2.graph import initial_v2_2_state, initial_v2_3_state
 
 
 class FakeBackend:
@@ -262,8 +262,10 @@ def _state(
     *,
     complexity: str = "simple",
     hitl_rounds: int = 0,
+    target_stage: str = "v2_3",
 ) -> V2State:
-    state = initial_v2_2_state("original question", request_id=pending.request_id)
+    initializer = initial_v2_3_state if target_stage == "v2_3" else initial_v2_2_state
+    state = initializer("original question", request_id=pending.request_id)
     state.update(
         {
             "complexity_decision": ComplexityDecision(
@@ -278,6 +280,15 @@ def _state(
         }
     )
     return state
+
+
+class CountingRecovery:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def recover(self, **kwargs: object) -> object:
+        self.calls += 1
+        raise AssertionError("recovery must not be called for a non-resumable stage")
 
 
 def _resume(state: V2State, *, response: object, **service_kwargs: object):
@@ -301,6 +312,56 @@ def test_await_user_input_is_a_side_effect_free_boundary() -> None:
         "answer_outcome": None,
         "final_answer": None,
     }
+    assert serialize_state(state) == before
+
+
+def test_v22_waiting_state_rejects_resume_without_mutation_or_execution() -> None:
+    request_id = "00000000-0000-4000-8000-000000000002"
+    task, pending, evidence = _waiting_task(request_id=request_id)
+    state = _state(task, pending, evidence, target_stage="v2_2")
+    request = ResumeRequest(
+        request_id=request_id,
+        hitl_request_id=pending.id,
+        responses=[{"item_id": "ITEM_001", "clarify_values": {"year": "2019"}}],
+    )
+    backend = FakeBackend(["new"])
+    grader = SequenceGrader([])
+    finding = FakeFinding()
+    synthesis = FakeSynthesis()
+    recovery = CountingRecovery()
+    before = serialize_state(state)
+
+    with pytest.raises(HITLResumeError) as exc_info:
+        HITLResumeService(
+            V2Config(),
+            backend=backend,
+            grader=grader,
+            finding=finding,
+            synthesis=synthesis,
+            recovery=recovery,  # type: ignore[arg-type]
+        ).resume(state, request)
+
+    assert exc_info.value.execution_error.code == "request_not_resumable"
+    assert serialize_state(state) == before
+    assert state["hitl_rounds"] == 0
+    assert len(state["tasks"]["SQ_001"].query_revisions) == 1
+    assert backend.calls == []
+    assert grader.calls == []
+    assert finding.calls == []
+    assert synthesis.calls == []
+    assert recovery.calls == 0
+
+
+def test_await_user_input_rejects_v22_waiting_state() -> None:
+    request_id = "00000000-0000-4000-8000-000000000006"
+    task, pending, evidence = _waiting_task(request_id=request_id)
+    state = _state(task, pending, evidence, target_stage="v2_2")
+    before = serialize_state(state)
+
+    with pytest.raises(HITLResumeError) as exc_info:
+        await_user_input(state)
+
+    assert exc_info.value.execution_error.code == "request_not_resumable"
     assert serialize_state(state) == before
 
 
