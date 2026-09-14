@@ -365,7 +365,8 @@ def test_duplicate_recovery_query_uses_one_bounded_repair_and_fails() -> None:
         ).recover(task=task, evidence_by_id=evidence)
 
     assert model.calls == 2
-    assert raised.value.execution_error.code == "recovery_duplicate_query"
+    assert raised.value.execution_error.code == "invalid_recovery_artifact"
+    assert raised.value.execution_error.details["reason"] == "duplicate_query"
     assert raised.value.failed_task.query_revisions[-1].retrieval_attempts == task.query_revisions[-1].retrieval_attempts
 
 
@@ -467,6 +468,54 @@ def test_grader_accepts_exact_two_attempt_union_and_rejects_external_evidence() 
             task=task,
             revision=revision,
             evidence=evidence[:-1] + [_evidence("external")],
+        )
+
+
+def test_grader_accepts_exact_ten_evidence_union() -> None:
+    task, _initial_evidence = _recovery_task()
+    revision = task.query_revisions[-1].model_copy(
+        update={
+            "retrieval_attempts": [
+                task.query_revisions[-1].retrieval_attempts[0],
+                RetrievalAttempt(
+                    id="ATT_SQ001_QR001_002",
+                    ordinal=2,
+                    strategy="direct_rewrite",
+                    retrieval_query="corrective query",
+                    evidence_ids=["F", "G", "H", "I", "J"],
+                ),
+            ]
+        }
+    )
+    evidence = [_evidence(item) for item in "ABCDEFGHIJ"]
+    model = SequenceStructuredModel([
+        {
+            "relevance": "strong",
+            "answerability": "sufficient",
+            "ambiguity": "none",
+            "recoverability": "none",
+            "failure_reason": "none",
+            "reason": "sufficient",
+            "missing_information": [],
+            "missing_slots": [],
+            "supporting_evidence_ids": ["A"],
+        }
+    ])
+
+    grade, attempts = EvidenceGrader(V2Config(), model=model).grade(
+        task=task,
+        revision=revision,
+        evidence=evidence,
+    )
+
+    assert grade.answerability == "sufficient"
+    assert attempts == 1
+
+    with pytest.raises(ValueError, match="evidence 上限"):
+        EvidenceGrader(V2Config(), model=model).grade(
+            task=task,
+            revision=revision,
+            evidence=[*evidence, _evidence("K")],
         )
 
 

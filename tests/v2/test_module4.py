@@ -326,7 +326,7 @@ def test_grader_prompt_is_scoped_to_current_task_and_final_evidence() -> None:
     ).run("question")
     prompt = model.prompts[0]
     assert "fact for question" in prompt
-    assert "final_top5_evidence" in prompt
+    assert "current_revision_evidence" in prompt
     assert '"allowed_supporting_evidence_ids"' in prompt
     assert '"question-evidence"' in prompt
     assert "Copy supporting_evidence_ids exactly from" in prompt

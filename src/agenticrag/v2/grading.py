@@ -18,7 +18,9 @@ from .schemas import Evidence, EvidenceGrade, ExecutionError, QueryRevision, Ret
 EVIDENCE_GRADER_SYSTEM_PROMPT = """你是 Agentic RAG V2 的 Evidence Grader。
 你只评估给定 RetrievalTask 的当前证据状态，不决定下一步 route，也不输出 recovery strategy。
 
-只能根据输入的 task query、task intent、当前 QueryRevision 和当前 revision 的 V1.2 Final Top-5 Evidence 判断：
+只能根据输入的 task query、task intent、当前 QueryRevision 和当前 revision 的 Evidence 判断。
+首次 grading 的 Evidence 是 Attempt 1 的 V1.2 Final Top-5；Recovery re-grade 的 Evidence 是同一
+QueryRevision 中 Attempt 1 与 Attempt 2 的 Final Top-5 union，按 Evidence ID 去重，最多 10 条：
 - relevance: none / weak / strong
 - answerability: none / partial / sufficient
 - ambiguity: none / missing_slot / multiple_candidates
@@ -173,7 +175,7 @@ def build_evidence_grader_prompt(
             "source": revision.source,
             "query": revision.query,
         },
-        "final_top5_evidence": evidence_payload,
+        "current_revision_evidence": evidence_payload,
         "allowed_supporting_evidence_ids": evidence_ids_in_input,
     }
     return f"{EVIDENCE_GRADER_SYSTEM_PROMPT}\n\n输入：\n{json.dumps(context, ensure_ascii=False, indent=2)}"

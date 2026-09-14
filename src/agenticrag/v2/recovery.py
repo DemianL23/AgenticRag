@@ -70,13 +70,16 @@ class RecoveryGenerationError(RuntimeError):
         self.cause = cause
         marker = str(cause).lower()
         if "recovery_duplicate_query" in marker:
-            code = "recovery_duplicate_query"
+            code = "invalid_recovery_artifact"
+            reason = "duplicate_query"
         elif isinstance(cause, (ValidationError, StructuredOutputContractError)) or any(
             token in marker for token in ("structured", "schema", "parse", "json")
         ):
             code = "invalid_recovery_artifact"
+            reason = "structured_output_contract"
         else:
             code = "recovery_model_failed"
+            reason = "model_failure"
         self.execution_error = ExecutionError(
             code=code,
             message=f"Recovery artifact generation failed after {attempts} attempt(s)",
@@ -87,6 +90,7 @@ class RecoveryGenerationError(RuntimeError):
                 "attempts": str(attempts),
                 "cause_type": type(cause).__name__,
                 "cause_message": _safe_exception_message(cause),
+                "reason": reason,
             },
         )
         super().__init__(self.execution_error.message)
