@@ -176,6 +176,72 @@ def test_authoring_uses_independent_judge_and_derives_route_from_policy(tmp_path
     assert all("grade_records" not in fixture.model_dump_json() for fixture in fixtures)
 
 
+def test_authoring_can_write_missing_output(tmp_path: Path) -> None:
+    source_path = tmp_path / "source-report.json"
+    source_path.write_text(json.dumps(_source_report()), encoding="utf-8")
+    output_path = tmp_path / "gold.jsonl"
+
+    result = author_gold_dataset(
+        source_path,
+        output_path=output_path,
+        judge=_FakeGoldJudge(_expected_answer().as_grade()),
+    )
+
+    assert Path(result["dataset_path"]) == output_path
+    assert output_path.exists()
+
+
+def test_authoring_refuses_existing_output_without_force(tmp_path: Path) -> None:
+    source_path = tmp_path / "source-report.json"
+    output_path = tmp_path / "gold.jsonl"
+    source_path.write_text(json.dumps(_source_report()), encoding="utf-8")
+    output_path.write_text("sentinel\n", encoding="utf-8")
+
+    with pytest.raises(FileExistsError, match="Refusing to overwrite"):
+        author_gold_dataset(
+            source_path,
+            output_path=output_path,
+            judge=_FakeGoldJudge(_expected_answer().as_grade()),
+        )
+    assert output_path.read_text(encoding="utf-8") == "sentinel\n"
+
+
+def test_authoring_force_allows_existing_output(tmp_path: Path) -> None:
+    source_path = tmp_path / "source-report.json"
+    output_path = tmp_path / "gold.jsonl"
+    source_path.write_text(json.dumps(_source_report()), encoding="utf-8")
+    output_path.write_text("sentinel\n", encoding="utf-8")
+
+    author_gold_dataset(
+        source_path,
+        output_path=output_path,
+        judge=_FakeGoldJudge(_expected_answer().as_grade()),
+        force=True,
+    )
+
+    assert output_path.read_text(encoding="utf-8") != "sentinel\n"
+    assert len(load_gold_dataset(output_path)) == 14
+
+
+def test_authoring_default_uses_unique_candidate_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source_path = tmp_path / "source-report.json"
+    source_path.write_text(json.dumps(_source_report()), encoding="utf-8")
+    candidate_root = tmp_path / "candidates"
+    monkeypatch.setattr("eval.v2.module4_gold.DEFAULT_CANDIDATE_ROOT", candidate_root)
+
+    result = author_gold_dataset(
+        source_path,
+        judge=_FakeGoldJudge(_expected_answer().as_grade()),
+    )
+
+    candidate_path = Path(result["dataset_path"])
+    assert candidate_path.parent.parent == candidate_root
+    assert candidate_path.name == "candidate.jsonl"
+    assert candidate_path.exists()
+
+
 def test_gold_judge_prompt_has_only_frozen_inputs_and_no_production_prediction() -> None:
     fixture = _fixture("M4G_001")
     prompt = build_gold_judge_prompt(
@@ -191,6 +257,22 @@ def test_gold_judge_prompt_has_only_frozen_inputs_and_no_production_prediction()
     assert "grade_records" not in prompt
     assert "routing_decisions" not in prompt
     assert "fact" in prompt
+
+
+def test_gold_judge_prompt_defines_partial_vs_none_generically() -> None:
+    fixture = _fixture("M4G_partial_none")
+    prompt = build_gold_judge_prompt(
+        {
+            "task": fixture.task.model_dump(mode="json"),
+            "query_revision": fixture.query_revision.model_dump(mode="json"),
+            "evidence": [item.model_dump(mode="json") for item in fixture.evidence],
+        }
+    )
+
+    assert "at least one explicitly requested target fact" in prompt
+    assert "none means the Evidence establishes none" in prompt
+    assert "Adjacent, proxy, or merely correlated metrics" in prompt
+    assert "Netflix gross margin history by year" not in prompt
 
 
 def test_gold_fixture_route_must_match_frozen_policy() -> None:
@@ -300,4 +382,13 @@ def test_frozen_real_gold_dataset_has_expected_shape_and_digest() -> None:
     assert len(fixtures) == 14
     assert len({fixture.qa_id for fixture in fixtures}) == 8
     assert not any(fixture.needs_review for fixture in fixtures)
-    assert sha256(path) == "a17431aed24b7025d139c46d92953aac64b39a56601797895ebbb6a0ca501082"
+    assert sha256(path) == "b2204ec505d76c3fd57dd060378ea0e9e5946482e4987b6b0b6c6a58ff1e594c"
+    adjudicated = next(
+        fixture for fixture in fixtures if fixture.gold_id == "M4G_indEN_00260_012"
+    )
+    assert adjudicated.expected.answerability == "none"
+    assert adjudicated.expected.supporting_evidence_ids == []
+    assert adjudicated.expected.route == "recover"
+    assert adjudicated.expected.recovery_strategy == "direct_rewrite"
+    assert adjudicated.needs_review is False
+    assert any("adjacent" in note.lower() for note in adjudicated.review_notes)

@@ -40,6 +40,7 @@ DEFAULT_SOURCE_REPORT = Path(
     "artifacts/eval/v2/module4_v2_1/278dedde-b6f1-4cd6-81d2-efdc7b7df655/report.json"
 )
 DEFAULT_GOLD_DATASET = Path("eval/datasets/v2_module4_grade_route_gold.jsonl")
+DEFAULT_CANDIDATE_ROOT = Path("artifacts/eval/v2/module4_gold_candidates")
 DEFAULT_OUTPUT_ROOT = Path("artifacts/eval/v2/module4_grade_route")
 
 
@@ -277,6 +278,13 @@ Semantic rules:
 - multiple_candidates means the query contains an expression that resolves to multiple plausible candidates.
 - A complete query with facts absent from Evidence is not missing_slot: use ambiguity=none,
   missing_slots=[], and describe the absent facts in missing_information.
+- Answerability boundary: sufficient means the Evidence is enough to answer the task. partial means
+  the Evidence establishes at least one explicitly requested target fact, but other necessary target
+  facts are still missing. none means the Evidence establishes none of the requested target facts.
+- Adjacent, proxy, or merely correlated metrics do not count as a requested target fact. For example,
+  if a task asks for gross margin but the Evidence only contains operating margin, net margin, and
+  EBITDA margin, answerability is none, not partial. Partial requires at least one actual requested
+  gross-margin value (for example, one year of a multi-year request).
 - supporting_evidence_ids must be copied exactly from allowed_supporting_evidence_ids.
 - answerability=none requires supporting_evidence_ids=[]; partial/sufficient requires at least one valid ID.
 - If another retrieval attempt could reasonably find missing facts, use recoverability=likely and a
@@ -376,9 +384,17 @@ def derive_gold_route(
 def author_gold_dataset(
     source_report_path: Path = DEFAULT_SOURCE_REPORT,
     *,
-    output_path: Path = DEFAULT_GOLD_DATASET,
+    output_path: Path | None = None,
     judge: Module4GoldJudge | None = None,
+    force: bool = False,
 ) -> dict[str, Any]:
+    if output_path is None:
+        output_path = DEFAULT_CANDIDATE_ROOT / str(uuid4()) / "candidate.jsonl"
+    elif output_path.exists() and not force:
+        raise FileExistsError(
+            f"Refusing to overwrite existing Gold output: {output_path}. "
+            "Pass force=True (CLI: --force) explicitly to overwrite."
+        )
     source_report = json.loads(source_report_path.read_text())
     inputs = extract_gold_inputs(source_report)
     judge = judge or Module4GoldJudge()
@@ -763,9 +779,21 @@ def main_author() -> None:
 
     parser = argparse.ArgumentParser(description="Author Module 4 Grade/Route Gold")
     parser.add_argument("--source-report", type=Path, default=DEFAULT_SOURCE_REPORT)
-    parser.add_argument("--output", type=Path, default=DEFAULT_GOLD_DATASET)
+    parser.add_argument(
+        "--output",
+        type=Path,
+        default=None,
+        help="Candidate output path; existing files require --force. Default: unique artifact path.",
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Explicitly allow overwriting an existing output file.",
+    )
     args = parser.parse_args()
-    result = author_gold_dataset(args.source_report, output_path=args.output)
+    result = author_gold_dataset(
+        args.source_report, output_path=args.output, force=args.force
+    )
     print(json.dumps(result, ensure_ascii=False))
 
 
