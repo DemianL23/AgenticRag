@@ -37,8 +37,15 @@ class FakePlanner:
 
 
 class FakeBackend:
-    def __init__(self, *, fail: bool = False, delay_queries: set[str] | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        fail: bool = False,
+        fail_queries: set[str] | None = None,
+        delay_queries: set[str] | None = None,
+    ) -> None:
         self.fail = fail
+        self.fail_queries = fail_queries or set()
         self.delay_queries = delay_queries or set()
         self.calls: list[str] = []
 
@@ -47,7 +54,7 @@ class FakeBackend:
         self.calls.append(query)
         if query in self.delay_queries:
             time.sleep(0.02)
-        if self.fail:
+        if self.fail or query in self.fail_queries:
             raise RuntimeError("retriever unavailable")
         evidence_id = "shared" if query in {"A", "B"} else f"{query}-evidence"
         content = "shared fact" if evidence_id == "shared" else f"fact for {query}"
@@ -92,6 +99,24 @@ class FakeStructuredModel:
         return self.output
 
 
+class QueryAwareGraderModel(FakeStructuredModel):
+    def __init__(self, *, fail_queries: set[str] | None = None) -> None:
+        super().__init__({})
+        self.fail_queries = fail_queries or set()
+
+    def invoke(self, prompt: str) -> object:
+        self.calls += 1
+        self.prompts.append(prompt)
+        if "shared fact" in prompt:
+            if self.fail_queries and "QR_SQ002" in prompt:
+                return {"relevance": "invalid"}
+            return _grade(supporting_evidence_ids=["shared"])
+        for query in ("A", "B", "C"):
+            if f"fact for {query}" in prompt:
+                return _grade(supporting_evidence_ids=[f"{query}-evidence"])
+        return _grade()
+
+
 def _simple_plan(capability: str = "retrieval_synthesis") -> PlanningResult:
     return PlanningResult.from_router(
         question="question",
@@ -112,6 +137,25 @@ def _complex_plan(*queries: str) -> PlanningResult:
         normalized_question="complex question",
         complexity_decision=ComplexityDecision(
             complexity="complex", capability=None, reason="independent facts"
+        ),
+        decomposition=DecompositionResult(tasks=drafts, decomposition_complete=True),
+        router_attempts=1,
+        decomposer_attempts=1,
+    )
+
+
+def _complex_plan_with_capabilities(
+    *task_specs: tuple[str, str],
+) -> PlanningResult:
+    drafts = [
+        TaskDraft(query=query, intent=f"intent {query}", capability=capability)
+        for query, capability in task_specs
+    ]
+    return PlanningResult(
+        question="complex question",
+        normalized_question="complex question",
+        complexity_decision=ComplexityDecision(
+            complexity="complex", capability=None, reason="mixed independent tasks"
         ),
         decomposition=DecompositionResult(tasks=drafts, decomposition_complete=True),
         router_attempts=1,
@@ -244,6 +288,72 @@ def test_retrieval_failure_is_failed_with_null_outcome() -> None:
     assert result.stage_result.answer_outcome is None
     assert result.tasks[0].execution_status == "failed"
     assert result.tasks[0].answer_outcome is None
+
+
+def test_partial_retrieval_failure_does_not_short_circuit_healthy_tasks() -> None:
+    config = V2Config()
+    result = Module4Service(
+        config,
+        planner=FakePlanner(_complex_plan("A", "B", "C")),
+        retrieval=RetrievalFanoutService(FakeBackend(fail_queries={"B"}), config),
+        grader=EvidenceGrader(config, model=QueryAwareGraderModel()),
+    ).run("complex question")
+
+    assert result.stage_result.execution_status == "failed"
+    assert result.tasks[1].execution_status == "failed"
+    assert result.tasks[1].answer_outcome is None
+    assert result.tasks[0].grade_records
+    assert result.tasks[2].grade_records
+    assert result.tasks[0].routing_decisions
+    assert result.tasks[2].routing_decisions
+    assert result.tasks[0].query_revisions
+    assert result.tasks[2].query_revisions
+    assert set(result.retrieval_results) == {"SQ_001", "SQ_003"}
+
+
+def test_partial_grader_failure_does_not_short_circuit_healthy_tasks() -> None:
+    config = V2Config()
+    result = Module4Service(
+        config,
+        planner=FakePlanner(_complex_plan("A", "B", "C")),
+        retrieval=RetrievalFanoutService(FakeBackend(), config),
+        grader=EvidenceGrader(config, model=QueryAwareGraderModel(fail_queries={"B"})),
+    ).run("complex question")
+
+    assert result.stage_result.execution_status == "failed"
+    assert result.tasks[1].execution_status == "failed"
+    assert result.tasks[1].answer_outcome is None
+    assert result.tasks[0].routing_decisions
+    assert result.tasks[2].routing_decisions
+    assert set(result.retrieval_results) == {"SQ_001", "SQ_002", "SQ_003"}
+    assert set(result.evidence) == {"shared", "C-evidence"}
+
+
+def test_mixed_supported_unsupported_and_failed_tasks_are_all_preserved() -> None:
+    config = V2Config()
+    backend = FakeBackend(fail_queries={"C"})
+    grader_model = QueryAwareGraderModel()
+    result = Module4Service(
+        config,
+        planner=FakePlanner(
+            _complex_plan_with_capabilities(
+                ("A", "retrieval_synthesis"),
+                ("B", "arithmetic"),
+                ("C", "retrieval_synthesis"),
+            )
+        ),
+        retrieval=RetrievalFanoutService(backend, config),
+        grader=EvidenceGrader(config, model=grader_model),
+    ).run("mixed question")
+
+    assert backend.calls == ["A", "C"]
+    assert grader_model.calls == 1
+    assert result.tasks[0].grade_records and result.tasks[0].routing_decisions
+    assert result.tasks[1].answer_outcome == "unsupported"
+    assert result.tasks[1].routing_decisions[0].route == "unsupported"
+    assert result.tasks[2].execution_status == "failed"
+    assert result.tasks[2].answer_outcome is None
+    assert result.stage_result.execution_status == "failed"
 
 
 def test_grader_failure_is_failed_with_null_outcome() -> None:

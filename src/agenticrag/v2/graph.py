@@ -170,25 +170,32 @@ def _retrieve_node(state: V2State, retrieval: RetrievalFanoutService) -> dict[st
             ),
         }
     updates: dict[str, RetrievalTask] = {task.id: task for task in result.tasks}
-    failed = next((task for task in result.tasks if task.execution_status == "failed"), None)
     output: dict[str, object] = {
         "tasks": updates,
         "retrieval_results": result.retrieval_results,
         "evidence": result.evidence,
     }
-    if failed is not None:
-        output["execution_status"] = "failed"
-        output["error"] = failed.error
     return output
 
 
 def _grade_node(state: V2State, grader: EvidenceGrader) -> dict[str, object]:
     task_updates: dict[str, RetrievalTask] = {}
+    first_error: ExecutionError | None = None
     for task_id, task in sorted(state.get("tasks", {}).items(), key=lambda item: (item[1].ordinal, item[0])):
         if task.execution_status == "failed" or task.answer_outcome == "unsupported":
             continue
         retrieval_result = state.get("retrieval_results", {}).get(task_id)
         if retrieval_result is None:
+            error = ExecutionError(
+                code="missing_retrieval_result",
+                message="healthy retrieval task has no RetrievalResult",
+                stage="module4_grading",
+                details={"task_id": task_id},
+            )
+            task_updates[task_id] = task.model_copy(
+                update={"execution_status": "failed", "answer_outcome": None, "error": error}
+            )
+            first_error = first_error or error
             continue
         try:
             revision = task.query_revisions[-1]
@@ -202,6 +209,7 @@ def _grade_node(state: V2State, grader: EvidenceGrader) -> dict[str, object]:
             )
             task_updates[task_id] = task.model_copy(update={"grade_records": [*task.grade_records, record]})
         except EvidenceGradingError as exc:
+            first_error = first_error or exc.execution_error
             task_updates[task_id] = task.model_copy(
                 update={
                     "execution_status": "failed",
@@ -209,11 +217,6 @@ def _grade_node(state: V2State, grader: EvidenceGrader) -> dict[str, object]:
                     "error": exc.execution_error,
                 }
             )
-            return {
-                "tasks": task_updates,
-                "execution_status": "failed",
-                "error": exc.execution_error,
-            }
         except Exception as exc:
             error = ExecutionError(
                 code="grader_failed",
@@ -221,17 +224,29 @@ def _grade_node(state: V2State, grader: EvidenceGrader) -> dict[str, object]:
                 stage="module4_grading",
                 details={"task_id": task_id, "exception_type": type(exc).__name__},
             )
-            task_updates[task_id] = task.model_copy(update={"execution_status": "failed", "error": error})
-            return {"tasks": task_updates, "execution_status": "failed", "error": error}
-    return {"tasks": task_updates}
+            first_error = first_error or error
+            task_updates[task_id] = task.model_copy(
+                update={
+                    "execution_status": "failed",
+                    "answer_outcome": None,
+                    "error": error,
+                }
+            )
+    output: dict[str, object] = {"tasks": task_updates}
+    # This is diagnostic state only.  It deliberately does not short-circuit
+    # the route node; finalization evaluates all task outcomes together.
+    if first_error is not None:
+        output["error"] = first_error
+    return output
 
 
 def _route_node(state: V2State, config: V2Config) -> dict[str, object]:
     task_updates: dict[str, RetrievalTask] = {}
-    try:
-        for task_id, task in sorted(state.get("tasks", {}).items(), key=lambda item: (item[1].ordinal, item[0])):
-            if task.execution_status == "failed":
-                continue
+    first_error: ExecutionError | None = None
+    for task_id, task in sorted(state.get("tasks", {}).items(), key=lambda item: (item[1].ordinal, item[0])):
+        if task.execution_status == "failed":
+            continue
+        try:
             if task.answer_outcome == "unsupported":
                 decision = unsupported_routing_decision(task)
             else:
@@ -243,15 +258,21 @@ def _route_node(state: V2State, config: V2Config) -> dict[str, object]:
             task_updates[task_id] = task.model_copy(
                 update={"routing_decisions": [*task.routing_decisions, decision]}
             )
-    except Exception as exc:
-        error = ExecutionError(
-            code="routing_failed",
-            message="Deterministic routing policy failed",
-            stage="module4_routing",
-            details={"exception_type": type(exc).__name__},
-        )
-        return {"tasks": task_updates, "execution_status": "failed", "error": error}
-    return {"tasks": task_updates}
+        except Exception as exc:
+            error = ExecutionError(
+                code="routing_failed",
+                message="Deterministic routing policy failed",
+                stage="module4_routing",
+                details={"task_id": task_id, "exception_type": type(exc).__name__},
+            )
+            first_error = first_error or error
+            task_updates[task_id] = task.model_copy(
+                update={"execution_status": "failed", "answer_outcome": None, "error": error}
+            )
+    output: dict[str, object] = {"tasks": task_updates}
+    if first_error is not None:
+        output["error"] = first_error
+    return output
 
 
 def _continue_after_plan(state: V2State) -> Literal["materialize_tasks", "stage_finalize"]:
@@ -267,8 +288,19 @@ def _continue_after_grade(state: V2State) -> Literal["route", "stage_finalize"]:
 
 
 def _finalize_node(state: V2State) -> dict[str, object]:
-    status = "failed" if state["execution_status"] == "failed" else "completed"
+    failed_tasks = [
+        task for task in state.get("tasks", {}).values() if task.execution_status == "failed"
+    ]
+    status = "failed" if state["execution_status"] == "failed" or failed_tasks else "completed"
     error = state.get("error")
+    if error is None and failed_tasks:
+        error = failed_tasks[0].error
+    if error is None and failed_tasks:
+        error = ExecutionError(
+            code="task_failed",
+            message="one or more required tasks failed",
+            stage="module4_finalize",
+        )
     try:
         stage = StageRunResult(
             request_id=state["request_id"],

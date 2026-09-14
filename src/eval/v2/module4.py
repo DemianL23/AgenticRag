@@ -96,6 +96,12 @@ def evaluate_module4(
     invariant_violations = 0
     supported_observed = 0
 
+    def attach_invariants(item: dict[str, Any]) -> None:
+        nonlocal invariant_violations
+        violations = check_module4_invariants(item.get("observed"))
+        item["invariant_violations"] = violations
+        invariant_violations += len(violations)
+
     for record in records:
         expected = record["expected"]
         expected_route = expected.get("route")
@@ -119,16 +125,29 @@ def evaluate_module4(
             unsupported_total += 1
             tasks = _deterministic_unsupported_tasks(record)
             decisions = [unsupported_routing_decision(task) for task in tasks]
+            tasks = [
+                task.model_copy(
+                    update={
+                        "execution_status": "completed",
+                        "answer_outcome": "unsupported",
+                        "terminal_reason": f"unsupported_capability:{task.capability}",
+                        "routing_decisions": [decision],
+                    }
+                )
+                for task, decision in zip(tasks, decisions, strict=True)
+            ]
             correct = all(decision.route == expected_route for decision in decisions)
             unsupported_correct += int(correct)
             item["observed"] = {
                 "mode": "deterministic_capability_gold",
                 "tasks": [task.model_dump(mode="json") for task in tasks],
+                "task_order": [task.id for task in tasks],
                 "routing_decisions": [decision.model_dump(mode="json") for decision in decisions],
                 "retriever_called": False,
                 "grader_called": False,
                 "correct": correct,
             }
+            attach_invariants(item)
             predictions.append(item)
             continue
 
@@ -140,6 +159,7 @@ def evaluate_module4(
                 technical_failures += 1
                 item["errors"].append(_error("service_initialization_failed", exc))
                 item["observed"] = {"mode": "runtime", "status": "technical_failure"}
+                attach_invariants(item)
                 predictions.append(item)
                 continue
         try:
@@ -163,6 +183,7 @@ def evaluate_module4(
                 if result.planning_result is not None
                 else None,
                 "tasks": [task.model_dump(mode="json") for task in task_values],
+                "task_order": [task.id for task in task_values],
                 "evidence": [item.model_dump(mode="json") for item in result.evidence.values()],
                 "retrieval_results": {
                     task_id: retrieval.model_dump(mode="json")
@@ -173,6 +194,7 @@ def evaluate_module4(
             technical_failures += 1
             item["errors"].append(_error("module4_runtime_failed", exc))
             item["observed"] = {"mode": "runtime", "status": "technical_failure"}
+        attach_invariants(item)
         predictions.append(item)
 
     report = {
@@ -200,14 +222,11 @@ def evaluate_module4(
             "unsupported_total": unsupported_total,
             "retrieval_completed_count": sum(
                 int(
-                    item.get("observed", {}).get("status") == "completed"
-                    and any(
-                        task.get("query_revisions")
-                        for task in item.get("observed", {}).get("tasks", [])
-                    )
+                    bool(task.get("query_revisions"))
+                    and task.get("id") in (item.get("observed") or {}).get("retrieval_results", {})
                 )
                 for item in predictions
-                if item["expected"].get("route") != "unsupported"
+                for task in (item.get("observed") or {}).get("tasks", [])
             ),
             "grader_completed_count": grader_calls,
             "route_accuracy": None,
@@ -228,6 +247,7 @@ def evaluate_module4(
             ),
         },
         "evaluation_incomplete": evaluation_incomplete > 0,
+        "invariant_evaluation": "evaluated",
         "predictions": predictions,
         "elapsed_seconds": time.perf_counter() - started,
     }
@@ -265,6 +285,93 @@ def _deterministic_unsupported_tasks(record: dict[str, Any]):
         decomposer_attempts=1 if expected["complexity"] == "complex" else 0,
     )
     return materialize_retrieval_tasks(planning)
+
+
+def check_module4_invariants(observed: dict[str, Any] | None) -> list[str]:
+    """Check observable Module 4 contracts without treating quality as a violation."""
+    if not observed or observed.get("status") == "technical_failure":
+        return []
+    violations: list[str] = []
+    tasks = observed.get("tasks", [])
+    if not isinstance(tasks, list):
+        return ["tasks_not_list"]
+    task_order = observed.get("task_order")
+    task_ids = [task.get("id") for task in tasks]
+    if task_order is not None and task_order != task_ids:
+        violations.append("task_order_not_stable")
+    retrieval_results = observed.get("retrieval_results", {})
+    if not isinstance(retrieval_results, dict):
+        violations.append("retrieval_results_not_map")
+        retrieval_results = {}
+
+    for task in tasks:
+        task_id = task.get("id")
+        capability = task.get("capability")
+        status = task.get("execution_status")
+        outcome = task.get("answer_outcome")
+        grades = task.get("grade_records", [])
+        routes = task.get("routing_decisions", [])
+        if status == "failed" and outcome is not None:
+            violations.append(f"{task_id}:failed_task_has_outcome")
+        if status == "failed" and not task.get("error"):
+            violations.append(f"{task_id}:failed_task_missing_error")
+        if capability != "retrieval_synthesis":
+            if retrieval_results.get(task_id) is not None:
+                violations.append(f"{task_id}:unsupported_has_retrieval_result")
+            if grades:
+                violations.append(f"{task_id}:unsupported_has_grade")
+            if not routes or routes[-1].get("route") != "unsupported":
+                violations.append(f"{task_id}:unsupported_route_missing")
+            elif routes[-1].get("grade_record_id") is not None:
+                violations.append(f"{task_id}:unsupported_route_has_grade")
+            if status != "completed" or outcome != "unsupported":
+                violations.append(f"{task_id}:unsupported_status_contract")
+            if task.get("query_revisions"):
+                violations.append(f"{task_id}:unsupported_has_query_revision")
+            continue
+
+        retrieval = retrieval_results.get(task_id)
+        if status != "failed" and task.get("query_revisions") and retrieval is None:
+            violations.append(f"{task_id}:retrieval_result_missing")
+        if status == "failed":
+            continue
+        if retrieval is not None:
+            if not grades:
+                violations.append(f"{task_id}:successful_retrieval_missing_grade")
+            else:
+                record = grades[-1]
+                input_ids = record.get("input_evidence_ids", [])
+                grade = record.get("grade", {})
+                supporting = grade.get("supporting_evidence_ids", [])
+                evidence_ids = {
+                    item.get("evidence_id")
+                    for item in retrieval.get("evidence", [])
+                }
+                if len(input_ids) != len(set(input_ids)):
+                    violations.append(f"{task_id}:grade_input_ids_duplicate")
+                if set(input_ids) != evidence_ids:
+                    violations.append(f"{task_id}:grade_input_not_final_evidence")
+                if not set(supporting) <= set(input_ids):
+                    violations.append(f"{task_id}:grade_supporting_id_outside_input")
+            if not routes:
+                violations.append(f"{task_id}:successful_grade_missing_route")
+            else:
+                route = routes[-1]
+                if route.get("route") == "unsupported":
+                    violations.append(f"{task_id}:supported_task_unsupported_route")
+                if grades and route.get("grade_record_id") != grades[-1].get("id"):
+                    violations.append(f"{task_id}:route_grade_record_mismatch")
+                if route.get("route") == "recover" and not route.get("recovery_strategy"):
+                    violations.append(f"{task_id}:recover_route_missing_strategy")
+                if route.get("route") != "recover" and route.get("recovery_strategy") is not None:
+                    violations.append(f"{task_id}:non_recover_route_has_strategy")
+
+    stage_result = observed.get("stage_result")
+    if isinstance(stage_result, dict):
+        if any(task.get("execution_status") == "failed" for task in tasks):
+            if stage_result.get("execution_status") != "failed":
+                violations.append("stage_failed_task_status_mismatch")
+    return violations
 
 
 def _error(code: str, exc: Exception) -> dict[str, Any]:
