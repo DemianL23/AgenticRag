@@ -1,8 +1,17 @@
-"""Module 1 contracts for the Agentic RAG V2 workflow."""
+"""Agentic RAG V2 domain contracts and stage services."""
 
 from .config import V2Config
 from .ids import new_request_id
 from .planning import PlanningError, PlanningResult, PlanningService, plan
+from .grading import EvidenceGrader, EvidenceGradingError
+from .graph import build_graph_v2_1, initial_v2_1_state
+from .module4 import (
+    MaterializationError,
+    Module4Run,
+    Module4Service,
+    materialize_retrieval_tasks,
+    unsupported_routing_decision,
+)
 from .retrieval import (
     RetrievalBackendError,
     RetrievalFanoutResult,
@@ -46,6 +55,15 @@ __all__ = [
     "PlanningResult",
     "PlanningService",
     "plan",
+    "EvidenceGrader",
+    "EvidenceGradingError",
+    "build_graph_v2_1",
+    "initial_v2_1_state",
+    "MaterializationError",
+    "Module4Run",
+    "Module4Service",
+    "materialize_retrieval_tasks",
+    "unsupported_routing_decision",
     "RetrievalBackendError",
     "RetrievalFanoutResult",
     "RetrievalFanoutService",

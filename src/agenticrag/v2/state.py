@@ -1,8 +1,4 @@
-"""Serializable LangGraph state contract for V2.
-
-The graph itself is intentionally introduced in a later module. This module
-only defines the state shape and reducers that later graph builders will use.
-"""
+"""Serializable LangGraph state contract and reducers for V2.1 and later."""
 
 from __future__ import annotations
 
@@ -14,10 +10,12 @@ from .schemas import (
     Evidence,
     ExecutionError,
     HITLRequest,
+    RetrievalResult,
     RetrievalTask,
     StageRunResult,
     SynthesizedAnswer,
 )
+from .planning import PlanningResult
 from .types import GlobalAnswerOutcome, GlobalExecutionStatus, ResponseLanguage, TargetStage
 
 
@@ -72,8 +70,10 @@ class V2State(TypedDict):
     response_language: ResponseLanguage
 
     complexity_decision: ComplexityDecision | None
+    planning_result: PlanningResult | None
     task_order: list[str]
     tasks: Annotated[dict[str, RetrievalTask], merge_tasks]
+    retrieval_results: dict[str, RetrievalResult]
     evidence: Annotated[dict[str, Evidence], merge_evidence]
 
     pending_hitl_request: HITLRequest | None

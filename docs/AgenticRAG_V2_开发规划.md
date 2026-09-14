@@ -242,8 +242,10 @@ class V2State(TypedDict):
     response_language: ResponseLanguage
 
     complexity_decision: ComplexityDecision | None
+    planning_result: PlanningResult | None
     task_order: list[str]
     tasks: dict[str, RetrievalTask]
+    retrieval_results: dict[str, RetrievalResult]
     evidence: dict[str, Evidence]
 
     pending_hitl_request: HITLRequest | None
