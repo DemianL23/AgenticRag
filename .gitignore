@@ -18,6 +18,10 @@ wheels/
 /artifacts/
 /models/
 /volumes/
+*.sqlite
+*.sqlite3
+*.sqlite-wal
+*.sqlite-shm
 *:Zone.Identifier
 
 # Frontend dependencies and build output

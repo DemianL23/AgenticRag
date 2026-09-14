@@ -1,11 +1,11 @@
 """Agentic RAG V2 domain contracts and stage services."""
 
-from .config import V2Config
+from .config import V2Config, V2PersistenceConfig
 from .ids import new_request_id
 from .planning import PlanningError, PlanningResult, PlanningService, plan
 from .grading import EvidenceGrader, EvidenceGradingError
 from .graph import build_graph_v2_1, initial_v2_1_state
-from .graph import build_graph_v2_2, initial_v2_2_state
+from .graph import build_graph_v2_2, initial_v2_2_state, build_graph_v2_3
 from .graph import initial_v2_3_state
 from .answering import (
     AnswerGenerationError,
@@ -23,6 +23,14 @@ from .module4 import (
 )
 from .module6 import Module6Run, Module6Service
 from .hitl import HITLResumeError, HITLResumeResult, HITLResumeService, await_user_input
+from .durable import DurableRun, DurableStatus, DurableV23Service, PersistenceDependencyError
+from .persistence import (
+    CleanupReport,
+    LeaseConflictError,
+    PersistenceError,
+    RequestMetadata,
+    RequestMetadataRepository,
+)
 from .retrieval import (
     RetrievalBackendError,
     RetrievalFanoutResult,
@@ -61,6 +69,7 @@ __all__ = [
     "SynthesizedAnswer",
     "TaskDraft",
     "V2Config",
+    "V2PersistenceConfig",
     "new_request_id",
     "PlanningError",
     "PlanningResult",
@@ -73,6 +82,7 @@ __all__ = [
     "build_graph_v2_2",
     "initial_v2_2_state",
     "initial_v2_3_state",
+    "build_graph_v2_3",
     "AnswerGenerationError",
     "FindingGenerator",
     "HITLContentGenerator",
@@ -89,6 +99,15 @@ __all__ = [
     "HITLResumeResult",
     "HITLResumeService",
     "await_user_input",
+    "DurableRun",
+    "DurableStatus",
+    "DurableV23Service",
+    "PersistenceDependencyError",
+    "CleanupReport",
+    "LeaseConflictError",
+    "PersistenceError",
+    "RequestMetadata",
+    "RequestMetadataRepository",
     "RetrievalBackendError",
     "RetrievalFanoutResult",
     "RetrievalFanoutService",

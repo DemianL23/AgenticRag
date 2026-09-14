@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import re
 from typing import Literal
 
 from langgraph.graph import END, START, StateGraph
+from langgraph.types import Overwrite, interrupt
 
 from .config import V2Config
 from .answering import (
@@ -17,6 +19,7 @@ from .answering import (
     validate_synthesized_answer,
 )
 from .grading import EvidenceGrader, EvidenceGradingError
+from .hitl import HITLResumeError, HITLResumeService
 from .ids import new_request_id, validate_request_id
 from .module4 import (
     make_grade_record,
@@ -31,6 +34,7 @@ from .retrieval import RetrievalFanoutService
 from .schemas import (
     ExecutionError,
     RetrievalTask,
+    ResumeRequest,
     StageRunResult,
     SynthesizedAnswer,
 )
@@ -232,6 +236,13 @@ def _retrieve_node(state: V2State, retrieval: RetrievalFanoutService) -> dict[st
         "evidence": result.evidence,
     }
     return output
+
+
+def _retrieve_v23_node(
+    state: V2State, retrieval: RetrievalFanoutService
+) -> dict[str, object]:
+    """Keep full V1.2 diagnostics in trace/report, not durable checkpoints."""
+    return _compact_retrieval_output(_retrieve_node(state, retrieval))
 
 
 def _grade_node(state: V2State, grader: EvidenceGrader) -> dict[str, object]:
@@ -489,6 +500,124 @@ def build_graph_v2_2(
     return workflow.compile()
 
 
+def build_graph_v2_3(
+    *,
+    checkpointer: object,
+    config: V2Config | None = None,
+    planner: PlanningService | None = None,
+    retrieval: RetrievalFanoutService | None = None,
+    grader: EvidenceGrader | None = None,
+    recovery: RecoveryService | None = None,
+    finding: FindingGenerator | None = None,
+    synthesis: SynthesisGenerator | None = None,
+    hitl: HITLContentGenerator | None = None,
+    resume_service: HITLResumeService | None = None,
+):
+    """Build the durable V2.3 graph around the frozen V2.2 business nodes.
+
+    The only additional business boundary is ``await_user_input``.  It owns
+    the LangGraph interrupt and delegates accepted payloads exactly once to
+    the frozen Module 7 resume service.
+    """
+    config = config or V2Config.from_env()
+    planner = planner or PlanningService(config)
+    if retrieval is None:
+        from .retrieval import V12RetrievalAdapter
+
+        retrieval = RetrievalFanoutService(V12RetrievalAdapter(), config)
+    grader = grader or EvidenceGrader(config)
+    recovery = recovery or RecoveryService(config)
+    finding = finding or FindingGenerator(config)
+    synthesis = synthesis or SynthesisGenerator(config)
+    hitl = hitl or HITLContentGenerator(config)
+    resume_service = resume_service or HITLResumeService(config)
+
+    workflow = StateGraph(V2State)
+    workflow.add_node("initialize", lambda state: {})
+    workflow.add_node("plan", lambda state: _plan_node(state, planner))
+    workflow.add_node("materialize_tasks", lambda state: _materialize_node(state, config))
+    workflow.add_node("retrieve", lambda state: _retrieve_v23_node(state, retrieval))
+    workflow.add_node("grade", lambda state: _grade_node(state, grader))
+    workflow.add_node("route", lambda state: _route_node(state, config))
+    workflow.add_node("recover", lambda state: _recover_v23_node(state, recovery))
+    workflow.add_node("terminalize_routes", _terminalize_routes_node)
+    workflow.add_node("generate_findings", lambda state: _finding_node(state, finding))
+    workflow.add_node(
+        "build_hitl_request",
+        lambda state: _build_hitl_request_node(
+            state, config, hitl, state["response_language"]
+        ),
+    )
+    workflow.add_node(
+        "await_user_input",
+        lambda state: _await_v23_node(state, resume_service),
+    )
+    workflow.add_node("aggregate_outcomes", _aggregate_node)
+    workflow.add_node("simple_answer", lambda state: _simple_answer_node(state))
+    workflow.add_node("synthesize", lambda state: _synthesis_node(state, synthesis))
+    workflow.add_node("terminal_answer", _terminal_answer_node)
+    workflow.add_node("waiting_finalize", _waiting_finalize_node)
+    workflow.add_node("validate_final_answer", _validate_final_answer_node)
+    workflow.add_node("stage_finalize", _finalize_v23_node)
+
+    workflow.add_edge(START, "initialize")
+    workflow.add_edge("initialize", "plan")
+    workflow.add_conditional_edges(
+        "plan",
+        _continue_after_plan,
+        {"materialize_tasks": "materialize_tasks", "stage_finalize": "stage_finalize"},
+    )
+    workflow.add_edge("materialize_tasks", "retrieve")
+    workflow.add_conditional_edges(
+        "retrieve",
+        _continue_after_retrieve,
+        {"grade": "grade", "stage_finalize": "stage_finalize"},
+    )
+    workflow.add_conditional_edges(
+        "grade",
+        _continue_after_grade,
+        {"route": "route", "stage_finalize": "stage_finalize"},
+    )
+    workflow.add_conditional_edges(
+        "route",
+        _continue_after_route_v22,
+        {
+            "recover": "recover",
+            "terminalize_routes": "terminalize_routes",
+            "stage_finalize": "stage_finalize",
+        },
+    )
+    workflow.add_edge("recover", "terminalize_routes")
+    workflow.add_conditional_edges(
+        "terminalize_routes",
+        _continue_after_terminalize_v22,
+        {"waiting": "build_hitl_request", "findings": "generate_findings"},
+    )
+    workflow.add_edge("generate_findings", "build_hitl_request")
+    workflow.add_conditional_edges(
+        "build_hitl_request",
+        _continue_after_hitl_v23,
+        {"waiting": "await_user_input", "aggregate": "aggregate_outcomes"},
+    )
+    workflow.add_edge("await_user_input", END)
+    workflow.add_conditional_edges(
+        "aggregate_outcomes",
+        _continue_after_aggregate_v22,
+        {
+            "terminal_answer": "terminal_answer",
+            "simple_answer": "simple_answer",
+            "synthesize": "synthesize",
+            "stage_finalize": "stage_finalize",
+        },
+    )
+    workflow.add_edge("terminal_answer", "validate_final_answer")
+    workflow.add_edge("simple_answer", "validate_final_answer")
+    workflow.add_edge("synthesize", "validate_final_answer")
+    workflow.add_edge("validate_final_answer", "stage_finalize")
+    workflow.add_edge("stage_finalize", END)
+    return workflow.compile(checkpointer=checkpointer)
+
+
 def _continue_after_route_v22(
     state: V2State,
 ) -> Literal["recover", "terminalize_routes", "stage_finalize"]:
@@ -517,6 +646,55 @@ def _continue_after_hitl_v22(
     state: V2State,
 ) -> Literal["waiting", "aggregate"]:
     return "waiting" if state.get("pending_hitl_request") is not None else "aggregate"
+
+
+def _continue_after_hitl_v23(
+    state: V2State,
+) -> Literal["waiting", "aggregate"]:
+    return "waiting" if state.get("pending_hitl_request") is not None else "aggregate"
+
+
+def _await_v23_node(
+    state: V2State,
+    resume_service: HITLResumeService,
+) -> dict[str, object]:
+    """Pause durably, then delegate one resumed payload to Module 7."""
+    pending = state.get("pending_hitl_request")
+    if state.get("execution_status") != "waiting_user" or pending is None:
+        raise HITLResumeError(
+            code="request_not_resumable",
+            message="V2.3 await 必须有 waiting_user state 和 pending HITLRequest",
+        )
+    payload = interrupt(pending.model_dump(mode="json"))
+    try:
+        request = ResumeRequest.model_validate(payload)
+        resumed = resume_service.resume(state, request)
+    except HITLResumeError:
+        raise
+    except Exception as exc:
+        raise HITLResumeError(
+            code="resume_payload_invalid",
+            message="V2.3 interrupt resume payload 无效",
+            details={
+                "cause_type": type(exc).__name__,
+                "cause_message": _safe_graph_error_message(exc),
+            },
+        ) from exc
+    resumed_state = resumed.state
+    return {
+        "tasks": Overwrite(resumed_state["tasks"]),
+        "retrieval_results": _compact_retrieval_results(
+            resumed_state["retrieval_results"]
+        ),
+        "evidence": Overwrite(resumed_state["evidence"]),
+        "pending_hitl_request": resumed_state["pending_hitl_request"],
+        "hitl_rounds": resumed_state["hitl_rounds"],
+        "execution_status": resumed_state["execution_status"],
+        "answer_outcome": resumed_state["answer_outcome"],
+        "final_answer": resumed_state["final_answer"],
+        "error": resumed_state["error"],
+        "stage_result": resumed_state["stage_result"],
+    }
 
 
 def _continue_after_aggregate_v22(
@@ -581,6 +759,32 @@ def _recover_node(state: V2State, recovery: RecoveryService) -> dict[str, object
     if first_error is not None:
         output["error"] = first_error
     return output
+
+
+def _recover_v23_node(
+    state: V2State, recovery: RecoveryService
+) -> dict[str, object]:
+    return _compact_retrieval_output(_recover_node(state, recovery))
+
+
+def _compact_retrieval_output(output: dict[str, object]) -> dict[str, object]:
+    results = output.get("retrieval_results")
+    if not isinstance(results, dict):
+        return output
+    return {**output, "retrieval_results": _compact_retrieval_results(results)}
+
+
+def _compact_retrieval_results(value: object) -> object:
+    if not isinstance(value, dict):
+        return value
+    return {
+        task_id: result.model_copy(
+            update={"diagnostics": {"trace_ref": result.trace_ref}}
+        )
+        if hasattr(result, "model_copy")
+        else result
+        for task_id, result in value.items()
+    }
 
 
 def _terminalize_routes_node(state: V2State) -> dict[str, object]:
@@ -864,5 +1068,60 @@ def _finalize_v22_node(state: V2State) -> dict[str, object]:
     return {"stage_result": stage}
 
 
+def _finalize_v23_node(state: V2State) -> dict[str, object]:
+    """Finalize non-waiting V2.3 runs with the V2.3 terminal contract."""
+    status = state["execution_status"]
+    stage_kwargs: dict[str, object] = {
+        "request_id": state["request_id"],
+        "target_stage": "v2_3",
+        "execution_status": status,
+        "answer_outcome": state.get("answer_outcome"),
+        "final_answer": state.get("final_answer"),
+        "resumable": False,
+        "pending_hitl_request": state.get("pending_hitl_request"),
+        "error": state.get("error"),
+    }
+    if status == "failed":
+        stage_kwargs.update(answer_outcome=None, final_answer=None, pending_hitl_request=None)
+        if stage_kwargs["error"] is None:
+            stage_kwargs["error"] = ExecutionError(
+                code="module8_failed", message="V2.3 request failed", stage="module8_finalize"
+            )
+    try:
+        stage = StageRunResult(**stage_kwargs)
+    except Exception as exc:
+        error = ExecutionError(
+            code="stage_finalize_failed",
+            message="V2.3 StageRunResult validation failed",
+            stage="module8_finalize",
+            details={"exception_type": type(exc).__name__},
+        )
+        stage = StageRunResult(
+            request_id=state["request_id"],
+            target_stage="v2_3",
+            execution_status="failed",
+            error=error,
+        )
+        return {
+            "execution_status": "failed",
+            "answer_outcome": None,
+            "final_answer": None,
+            "error": error,
+            "stage_result": stage,
+        }
+    return {"stage_result": stage}
+
+
 def _module6_error(code: str, message: str) -> ExecutionError:
     return ExecutionError(code=code, message=message, stage="module6")
+
+
+def _safe_graph_error_message(exc: Exception, *, limit: int = 1000) -> str:
+    message = str(exc).strip()
+    message = re.sub(
+        r"(?i)(authorization\s*[:=]\s*)([^\s,;]+)",
+        r"\1[REDACTED]",
+        message,
+    )
+    message = re.sub(r"(?i)(bearer\s+)[^\s,;]+", r"\1[REDACTED]", message)
+    return message[:limit]

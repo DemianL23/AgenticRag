@@ -43,7 +43,11 @@ agenticrag-eval-v2-module4 = "eval.v2.module4:main"
 agenticrag-author-v2-module4-gold = "eval.v2.module4_gold:main_author"
 agenticrag-eval-v2-module4-gold = "eval.v2.module4_gold:main_replay"
 agenticrag-v2-run = "agenticrag.v2.cli:main"
+agenticrag-v2-status = "agenticrag.v2.cli:status_main"
+agenticrag-v2-resume = "agenticrag.v2.cli:resume_main"
+agenticrag-v2-checkpoint-cleanup = "agenticrag.v2.cli:cleanup_main"
 agenticrag-eval-v2-module6 = "eval.v2.module6:main"
+agenticrag-eval-v2-module8 = "eval.v2.module8:main"
 agenticrag-ask = "agenticrag.rag.ask:main"
 
 [project.optional-dependencies]
@@ -64,6 +68,9 @@ evaluation = [
 ]
 reranking = [
     "FlagEmbedding==1.4.2",
+]
+v2-persistence = [
+    "langgraph-checkpoint-sqlite>=3.1,<4.0",
 ]
 
 [build-system]

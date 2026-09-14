@@ -123,10 +123,33 @@ class V2BudgetConfig(V2Model):
         )
 
 
+class V2PersistenceConfig(V2Model):
+    """Configuration for the optional durable V2.3 boundary."""
+
+    sqlite_path: str = "artifacts/checkpoints/v2/agenticrag_v2.sqlite3"
+    lease_duration_seconds: int = Field(default=300, ge=1)
+    sqlite_busy_timeout_seconds: float = Field(default=30.0, gt=0)
+    schema_version: int = Field(default=1, ge=1)
+
+    @classmethod
+    def from_env(cls) -> "V2PersistenceConfig":
+        return cls(
+            sqlite_path=os.getenv(
+                "V2_SQLITE_PATH", "artifacts/checkpoints/v2/agenticrag_v2.sqlite3"
+            ),
+            lease_duration_seconds=_read_int("V2_LEASE_DURATION_SECONDS", 300),
+            sqlite_busy_timeout_seconds=_read_float(
+                "V2_SQLITE_BUSY_TIMEOUT_SECONDS", 30.0
+            ),
+            schema_version=_read_int("V2_PERSISTENCE_SCHEMA_VERSION", 1),
+        )
+
+
 class V2Config(V2Model):
     schema_version: str = "v2.1"
     default_response_language: Literal["zh", "en"] = "zh"
     budgets: V2BudgetConfig = Field(default_factory=V2BudgetConfig)
+    persistence: V2PersistenceConfig = Field(default_factory=V2PersistenceConfig)
     decision_models: DecisionModels = Field(default_factory=DecisionModels)
     answer_models: AnswerModels = Field(default_factory=AnswerModels)
 
@@ -140,6 +163,7 @@ class V2Config(V2Model):
             pass
         return cls(
             budgets=V2BudgetConfig.from_env(),
+            persistence=V2PersistenceConfig.from_env(),
             decision_models=DecisionModels.from_env(),
             answer_models=AnswerModels.from_env(),
             default_response_language=os.getenv(
