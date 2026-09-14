@@ -108,18 +108,26 @@ class EvidenceGrader:
         revision: QueryRevision,
         evidence: list[Evidence],
     ) -> tuple[EvidenceGrade, int]:
-        """Grade exactly one task against exactly its current Final Top-5."""
-        if len(evidence) > 5:
-            raise ValueError("Evidence Grader 输入不得超过当前 Final Top-5")
+        """Grade one task against its current revision's allowed Evidence set.
+
+        The initial grade accepts exactly one attempt's Final Top-5.  A recovery
+        re-grade accepts the exact union of the two attempts in the current
+        revision, still without admitting evidence from another revision/task.
+        """
+        expected_evidence_ids = _expected_revision_evidence_ids(revision)
+        max_evidence = 5 if len(revision.retrieval_attempts) == 1 else 10
+        if len(evidence) > max_evidence:
+            raise ValueError(
+                "Evidence Grader 输入不得超过当前 revision 的 evidence 上限"
+            )
         evidence_ids_in_input = [item.evidence_id for item in evidence]
         if len(evidence_ids_in_input) != len(set(evidence_ids_in_input)):
             raise ValueError("Evidence Grader 输入 Evidence ID 不得重复")
-        if revision.retrieval_attempts:
-            current_attempt_ids = set(revision.retrieval_attempts[-1].evidence_ids)
-            if set(evidence_ids_in_input) != current_attempt_ids:
-                raise ValueError("Evidence Grader 只能接收当前 revision 的 Final Top-5")
-        elif evidence:
-            raise ValueError("没有 RetrievalAttempt 时不能提供 Evidence")
+        if set(evidence_ids_in_input) != expected_evidence_ids:
+            raise ValueError(
+                "Evidence Grader 输入必须严格等于当前 revision 的 Final Top-5 "
+                "或两次 Attempt 的 Evidence union"
+            )
         evidence_ids = set(evidence_ids_in_input)
         prompt = build_evidence_grader_prompt(task=task, revision=revision, evidence=evidence)
         model = self._model or create_decision_chat_model(self.config.decision_models.grader)
@@ -222,3 +230,24 @@ def _safe_exception_message(cause: Exception) -> str:
     message = re.sub(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]+", "Bearer <redacted>", message)
     message = re.sub(r"(?i)\bsk-[A-Za-z0-9._-]+", "<redacted>", message)
     return message
+
+
+def _expected_revision_evidence_ids(revision: QueryRevision) -> set[str]:
+    """Return the only Evidence IDs legal for this revision's current grade."""
+    attempts = revision.retrieval_attempts
+    if not attempts:
+        return set()
+    if len(attempts) > 2:
+        raise ValueError("Evidence Grader 不支持超过两次 RetrievalAttempt")
+    if [attempt.ordinal for attempt in attempts] != list(range(1, len(attempts) + 1)):
+        raise ValueError("RetrievalAttempt ordinal 必须从 1 连续到当前 attempt")
+    attempt_ids = [attempt.id for attempt in attempts]
+    if len(attempt_ids) != len(set(attempt_ids)):
+        raise ValueError("RetrievalAttempt ID 不得重复")
+    if any(len(attempt.evidence_ids) > 5 for attempt in attempts):
+        raise ValueError("每次 RetrievalAttempt 最多只能有 5 个 Final Evidence")
+    return {
+        evidence_id
+        for attempt in attempts
+        for evidence_id in attempt.evidence_ids
+    }
