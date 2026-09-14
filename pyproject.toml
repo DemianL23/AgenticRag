@@ -40,6 +40,8 @@ agenticrag-document-embedding-compatibility = "eval.document_embedding_compatibi
 agenticrag-benchmark-document-embedding = "eval.document_embedding_benchmark:main"
 agenticrag-eval-v2-planning = "eval.v2.planning:main"
 agenticrag-eval-v2-module4 = "eval.v2.module4:main"
+agenticrag-author-v2-module4-gold = "eval.v2.module4_gold:main_author"
+agenticrag-eval-v2-module4-gold = "eval.v2.module4_gold:main_replay"
 agenticrag-ask = "agenticrag.rag.ask:main"
 
 [project.optional-dependencies]
