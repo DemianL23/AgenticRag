@@ -5,6 +5,13 @@ from .ids import new_request_id
 from .planning import PlanningError, PlanningResult, PlanningService, plan
 from .grading import EvidenceGrader, EvidenceGradingError
 from .graph import build_graph_v2_1, initial_v2_1_state
+from .graph import build_graph_v2_2, initial_v2_2_state
+from .answering import (
+    AnswerGenerationError,
+    FindingGenerator,
+    SynthesisGenerator,
+    validate_synthesized_answer,
+)
 from .module4 import (
     MaterializationError,
     Module4Run,
@@ -12,6 +19,7 @@ from .module4 import (
     materialize_retrieval_tasks,
     unsupported_routing_decision,
 )
+from .module6 import Module6Run, Module6Service
 from .retrieval import (
     RetrievalBackendError,
     RetrievalFanoutResult,
@@ -59,11 +67,19 @@ __all__ = [
     "EvidenceGradingError",
     "build_graph_v2_1",
     "initial_v2_1_state",
+    "build_graph_v2_2",
+    "initial_v2_2_state",
+    "AnswerGenerationError",
+    "FindingGenerator",
+    "SynthesisGenerator",
+    "validate_synthesized_answer",
     "MaterializationError",
     "Module4Run",
     "Module4Service",
     "materialize_retrieval_tasks",
     "unsupported_routing_decision",
+    "Module6Run",
+    "Module6Service",
     "RetrievalBackendError",
     "RetrievalFanoutResult",
     "RetrievalFanoutService",

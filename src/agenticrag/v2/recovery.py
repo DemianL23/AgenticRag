@@ -105,9 +105,13 @@ class RecoveryExecutionError(RuntimeError):
         task: RetrievalTask,
         execution_error: ExecutionError,
         cause: Exception | None = None,
+        retrieval_result: RetrievalResult | None = None,
+        evidence: dict[str, Evidence] | None = None,
     ) -> None:
         self.execution_error = execution_error
         self.cause = cause
+        self.retrieval_result = retrieval_result
+        self.evidence = evidence or {}
         self.failed_task = task.model_copy(
             update={
                 "execution_status": "failed",
@@ -343,6 +347,7 @@ class RecoveryService:
             ) from exc
 
         updated_task = _append_attempt(task, revision, attempt2)
+        union_evidence: dict[str, Evidence] = {}
         try:
             union_evidence = merge_evidence(
                 {item.evidence_id: item for item in current_evidence},
@@ -384,6 +389,8 @@ class RecoveryService:
                 task=updated_task,
                 execution_error=exc.execution_error,
                 cause=exc,
+                retrieval_result=retrieval_result,
+                evidence=union_evidence,
             ) from exc
         except Exception as exc:
             raise RecoveryExecutionError(
@@ -394,6 +401,8 @@ class RecoveryService:
                     details={"exception_type": type(exc).__name__},
                 ),
                 cause=exc,
+                retrieval_result=retrieval_result,
+                evidence=union_evidence,
             ) from exc
 
         return RecoveryRun(

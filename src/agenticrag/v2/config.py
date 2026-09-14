@@ -87,6 +87,15 @@ class AnswerModels(V2Model):
         default_factory=lambda: AnswerModelConfig(role="synthesis")
     )
 
+    @classmethod
+    def from_env(cls) -> "AnswerModels":
+        defaults = cls()
+        return cls(
+            simple_answer=_answer_role_from_env(defaults.simple_answer),
+            finding=_answer_role_from_env(defaults.finding),
+            synthesis=_answer_role_from_env(defaults.synthesis),
+        )
+
 
 class V2BudgetConfig(V2Model):
     max_subqueries: int = Field(default=4, ge=1)
@@ -132,6 +141,7 @@ class V2Config(V2Model):
         return cls(
             budgets=V2BudgetConfig.from_env(),
             decision_models=DecisionModels.from_env(),
+            answer_models=AnswerModels.from_env(),
             default_response_language=os.getenv(
                 "V2_DEFAULT_RESPONSE_LANGUAGE", "zh"
             ),
@@ -163,6 +173,46 @@ def _decision_role_from_env(config: DecisionModelConfig) -> DecisionModelConfig:
                     f"{shared_prefix}_MODEL",
                     os.getenv("GENERATION_MODEL", config.model),
                 ),
+            ),
+            "model_revision": _read_optional(
+                f"{role_prefix}_MODEL_REVISION",
+                _read_optional(f"{shared_prefix}_MODEL_REVISION", config.model_revision),
+            ),
+            "endpoint_identifier": os.getenv(
+                f"{role_prefix}_ENDPOINT_IDENTIFIER",
+                os.getenv(
+                    f"{shared_prefix}_ENDPOINT_IDENTIFIER", config.endpoint_identifier
+                ),
+            ),
+            "temperature": _read_float(
+                f"{role_prefix}_TEMPERATURE",
+                _read_float(f"{shared_prefix}_TEMPERATURE", config.temperature),
+            ),
+            "timeout_seconds": _read_float(
+                f"{role_prefix}_TIMEOUT_SECONDS",
+                _read_float(f"{shared_prefix}_TIMEOUT_SECONDS", config.timeout_seconds),
+            ),
+            "max_tokens": _read_int(
+                f"{role_prefix}_MAX_TOKENS",
+                _read_int(f"{shared_prefix}_MAX_TOKENS", config.max_tokens),
+            ),
+            "thinking": _read_bool(
+                f"{role_prefix}_THINKING",
+                _read_bool(f"{shared_prefix}_THINKING", config.thinking),
+            ),
+        }
+    )
+
+
+def _answer_role_from_env(config: AnswerModelConfig) -> AnswerModelConfig:
+    role_prefix = f"V2_{config.role.upper()}"
+    shared_prefix = "V2_ANSWER"
+    return AnswerModelConfig(
+        **{
+            **config.model_dump(),
+            "model": os.getenv(
+                f"{role_prefix}_MODEL",
+                os.getenv(f"{shared_prefix}_MODEL", os.getenv("GENERATION_MODEL", config.model)),
             ),
             "model_revision": _read_optional(
                 f"{role_prefix}_MODEL_REVISION",
