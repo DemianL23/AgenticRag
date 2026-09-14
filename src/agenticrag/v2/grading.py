@@ -7,6 +7,7 @@ selection remains the deterministic policy in :mod:`agenticrag.v2.policies`.
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 from .config import V2Config
@@ -35,11 +36,11 @@ EVIDENCE_GRADER_SYSTEM_PROMPT = """你是 Agentic RAG V2 的 Evidence Grader。
 - ambiguity=missing_slot 时 missing_slots 必须非空。
 
 missing_slot 与 missing_information 的语义边界：
-- missing_slot 是 query-side ambiguity，只能表示 TASK QUERY 本身缺少一个必须由用户补充的参数，
-  并且仅凭当前 query 无法形成有限、明确、可枚举的候选集合。典型参数包括未指定
-  year、region、company/entity 或无法从上下文推断的必要时间范围。
-- multiple_candidates 表示 TASK QUERY 本身已有多个明确、有限、合理且可枚举的解释，
-  应让用户在候选中选择，而不是请求用户补充一个无法界定的参数。
+- missing_slot 是 query-side ambiguity，只能表示 TASK QUERY 本身没有提供一个回答所必需的参数值。
+  判断只看 query 是否明确提供了该参数；Evidence 中碰巧出现候选值，也不能替代用户指定参数。
+  典型参数包括未指定 year、region、company/entity 或无法从上下文推断的必要时间范围。
+- multiple_candidates 表示 TASK QUERY 已经提供了名称、指代、概念或范围，但该表达本身可以解析成
+  多个明确、有限、合理且可枚举的候选，应让用户在候选中选择。
 - 不要把当前 Evidence 中缺失的事实当成 missing_slot。
 - 如果 task query 已经完整明确，但 Evidence 没有包含全部所需事实，必须使用
   ambiguity=none、missing_slots=[]，并把缺失事实写入 missing_information。
@@ -51,7 +52,8 @@ missing_slot 与 missing_information 的语义边界：
 
 最小对比示例（只表达判定原则，不是待回答的真实样本）：
  A. Task：“该年度的研发费用是多少？” Evidence：“2022研发费用……；2023研发费用……”
-   query 没有指定年度，因此 ambiguity=missing_slot、missing_slots=["year"]。
+   query 没有明确提供 year；Evidence 中有多个年份也不能替代用户指定，因此 ambiguity=missing_slot、
+   missing_slots=["year"]。
  B. Task：“2023年的研发费用是多少？” Evidence：“只找到2022年研发费用。”
    query 已完整但证据不足，因此 ambiguity=none、missing_slots=[]、
    missing_information=["2023研发费用"]、recoverability=likely、
@@ -83,7 +85,7 @@ class EvidenceGradingError(RuntimeError):
             message=f"Evidence Grader structured output failed after {attempts} attempt(s)",
             stage="module4_grading",
             retryable=False,
-            details={"attempts": str(attempts), "exception_type": type(cause).__name__},
+            details=_failure_details(cause, attempts),
         )
         super().__init__(self.execution_error.message)
 
@@ -160,3 +162,43 @@ def build_evidence_grader_prompt(
         "final_top5_evidence": evidence_payload,
     }
     return f"{EVIDENCE_GRADER_SYSTEM_PROMPT}\n\n输入：\n{json.dumps(context, ensure_ascii=False, indent=2)}"
+
+
+_MAX_DIAGNOSTIC_MESSAGE_LENGTH = 2000
+
+
+def _failure_details(cause: Exception, attempts: int) -> dict[str, str]:
+    """Return bounded diagnostics without serializing provider/runtime objects."""
+    details = {
+        "role": "grader",
+        "attempts": str(attempts),
+        "cause_type": type(cause).__name__,
+        "cause_message": _safe_exception_message(cause),
+    }
+    if isinstance(cause, PlanningError):
+        root_cause = cause.cause
+        details.update(
+            {
+                "root_cause_type": type(root_cause).__name__,
+                "root_cause_message": _safe_exception_message(root_cause),
+            }
+        )
+    return details
+
+
+def _safe_exception_message(cause: Exception) -> str:
+    """Truncate and redact common credential forms in exception messages."""
+    message = str(cause)[:_MAX_DIAGNOSTIC_MESSAGE_LENGTH]
+    message = re.sub(
+        r"(?i)(authorization\s*[:=]\s*(?:bearer\s+)?)[^\s,;}\]]+",
+        r"\1<redacted>",
+        message,
+    )
+    message = re.sub(
+        r"(?i)(api[_-]?key\s*[:=]\s*)[^\s,;}\]]+",
+        r"\1<redacted>",
+        message,
+    )
+    message = re.sub(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]+", "Bearer <redacted>", message)
+    message = re.sub(r"(?i)\bsk-[A-Za-z0-9._-]+", "<redacted>", message)
+    return message

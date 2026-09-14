@@ -5,7 +5,11 @@ import time
 import pytest
 
 from agenticrag.v2.config import V2Config
-from agenticrag.v2.grading import EVIDENCE_GRADER_SYSTEM_PROMPT, EvidenceGrader
+from agenticrag.v2.grading import (
+    EVIDENCE_GRADER_SYSTEM_PROMPT,
+    EvidenceGrader,
+    EvidenceGradingError,
+)
 from agenticrag.v2.graph import build_graph_v2_1
 from agenticrag.v2.module4 import (
     Module4Service,
@@ -101,6 +105,32 @@ class FakeStructuredModel:
         if self.fail:
             return {"relevance": "invalid"}
         return self.output
+
+
+class SequenceStructuredModel:
+    def __init__(self, outputs: list[object]) -> None:
+        self.outputs = outputs
+        self.calls = 0
+
+    def with_structured_output(self, schema: object) -> "SequenceStructuredModel":
+        return self
+
+    def invoke(self, prompt: str) -> object:
+        self.calls += 1
+        return self.outputs.pop(0)
+
+
+class RaisingStructuredModel:
+    def __init__(self, message: str) -> None:
+        self.message = message
+        self.calls = 0
+
+    def with_structured_output(self, schema: object) -> "RaisingStructuredModel":
+        return self
+
+    def invoke(self, prompt: str) -> object:
+        self.calls += 1
+        raise RuntimeError(self.message)
 
 
 class QueryAwareGraderModel(FakeStructuredModel):
@@ -536,6 +566,73 @@ def test_grader_failure_is_failed_with_null_outcome() -> None:
     assert result.stage_result.answer_outcome is None
     assert result.tasks[0].error is not None
     assert result.tasks[0].error.code == "structured_output_invalid"
+    assert result.tasks[0].error.details["attempts"] == "2"
+
+
+def test_grader_diagnostics_preserve_schema_validation_root_cause() -> None:
+    task, revision, evidence = _grader_input("完整问题", "证据")
+    invalid_grade = _grade(answerability="none")
+
+    with pytest.raises(EvidenceGradingError) as raised:
+        EvidenceGrader(
+            V2Config(), model=FakeStructuredModel(invalid_grade)
+        ).grade(task=task, revision=revision, evidence=evidence)
+
+    details = raised.value.execution_error.details
+    assert details["role"] == "grader"
+    assert details["attempts"] == "2"
+    assert details["cause_type"] == "PlanningError"
+    assert details["root_cause_type"] == "ValidationError"
+    assert "answerability=none" in details["root_cause_message"]
+
+
+def test_grader_diagnostics_preserve_supporting_evidence_contract_cause() -> None:
+    task, revision, evidence = _grader_input("完整问题", "证据")
+    invalid_grade = _grade(supporting_evidence_ids=["not-input"])
+
+    with pytest.raises(EvidenceGradingError) as raised:
+        EvidenceGrader(
+            V2Config(), model=FakeStructuredModel(invalid_grade)
+        ).grade(task=task, revision=revision, evidence=evidence)
+
+    details = raised.value.execution_error.details
+    assert details["root_cause_type"] == "StructuredOutputContractError"
+    assert "not-input" in details["root_cause_message"]
+
+
+def test_grader_diagnostics_preserve_parse_error_without_secrets() -> None:
+    task, revision, evidence = _grader_input("完整问题", "证据")
+    model = RaisingStructuredModel(
+        "JSON parse failed; Authorization: Bearer secret-token; "
+        "api_key=secret-key; sk-secret-value"
+    )
+
+    with pytest.raises(EvidenceGradingError) as raised:
+        EvidenceGrader(V2Config(), model=model).grade(
+            task=task, revision=revision, evidence=evidence
+        )
+
+    details = raised.value.execution_error.details
+    assert details["root_cause_type"] == "RuntimeError"
+    assert "JSON parse failed" in details["root_cause_message"]
+    assert "secret-token" not in details["root_cause_message"]
+    assert "secret-key" not in details["root_cause_message"]
+    assert "sk-secret-value" not in details["root_cause_message"]
+    assert "<redacted>" in details["root_cause_message"]
+
+
+def test_grader_retry_count_remains_two_and_retry_can_succeed() -> None:
+    task, revision, evidence = _grader_input("完整问题", "证据")
+    model = SequenceStructuredModel(
+        [{"relevance": "invalid"}, _grade(supporting_evidence_ids=["evidence-1"])]
+    )
+
+    _grade_result, attempts = EvidenceGrader(V2Config(), model=model).grade(
+        task=task, revision=revision, evidence=evidence
+    )
+
+    assert attempts == 2
+    assert model.calls == 2
 
 
 def test_complex_graph_is_stable_and_deduplicates_occurrences() -> None:
