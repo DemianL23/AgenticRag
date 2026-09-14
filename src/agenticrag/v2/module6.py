@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .answering import FindingGenerator, SynthesisGenerator
+from .answering import FindingGenerator, HITLContentGenerator, SynthesisGenerator
 from .config import V2Config
 from .grading import EvidenceGrader
 from .planning import PlanningResult, PlanningService
@@ -37,6 +37,7 @@ class Module6Service:
         recovery: RecoveryService | None = None,
         finding: FindingGenerator | None = None,
         synthesis: SynthesisGenerator | None = None,
+        hitl: HITLContentGenerator | None = None,
     ) -> None:
         self.config = config or V2Config.from_env()
         self.planner = planner or PlanningService(self.config)
@@ -47,6 +48,7 @@ class Module6Service:
         self.recovery = recovery or RecoveryService(self.config)
         self.finding = finding or FindingGenerator(self.config)
         self.synthesis = synthesis or SynthesisGenerator(self.config)
+        self.hitl = hitl or HITLContentGenerator(self.config)
 
     def run(
         self,
@@ -65,6 +67,7 @@ class Module6Service:
             recovery=self.recovery,
             finding=self.finding,
             synthesis=self.synthesis,
+            hitl=self.hitl,
         )
         initial = initial_v2_2_state(
             question,

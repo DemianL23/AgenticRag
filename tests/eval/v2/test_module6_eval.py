@@ -2,7 +2,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from agenticrag.v2.schemas import StageRunResult, SynthesizedAnswer
+from agenticrag.v2.schemas import (
+    QueryRevision,
+    RetrievalAttempt,
+    RetrievalTask,
+    StageRunResult,
+    SynthesizedAnswer,
+)
 from eval.v2.module6 import evaluate_module6
 
 
@@ -40,6 +46,16 @@ def test_module6_stage_report_is_unique_and_records_v22_metrics(tmp_path) -> Non
     )
     assert report["target_stage"] == "v2_2"
     assert report["metrics"]["global_answer_outcome"] == "complete"
+    assert set(report["model_configs"]) == {
+        "router",
+        "decomposer",
+        "grader",
+        "rewrite",
+        "hitl",
+        "simple_answer",
+        "finding",
+        "synthesis",
+    }
     assert (tmp_path / "run-1" / "report.json").exists()
     assert (tmp_path / "run-1" / "predictions.jsonl").exists()
 
@@ -54,3 +70,58 @@ def test_module6_stage_report_is_unique_and_records_v22_metrics(tmp_path) -> Non
         pass
     else:
         raise AssertionError("stage report must not overwrite an existing run")
+
+
+def test_stage_report_counts_degraded_attempts_not_overwritten_task_results(tmp_path) -> None:
+    task = RetrievalTask(
+        id="SQ_001",
+        ordinal=1,
+        query="question",
+        intent="answer question",
+        capability="retrieval_synthesis",
+        query_revisions=[
+            QueryRevision(
+                id="QR_SQ001_001",
+                ordinal=1,
+                source="original",
+                query="question",
+                retrieval_attempts=[
+                    RetrievalAttempt(
+                        id="ATT_SQ001_QR001_001",
+                        ordinal=1,
+                        strategy="original",
+                        retrieval_query="question",
+                        retrieval_degraded=True,
+                        retrieval_degraded_reason="fallback",
+                    ),
+                    RetrievalAttempt(
+                        id="ATT_SQ001_QR001_002",
+                        ordinal=2,
+                        strategy="direct_rewrite",
+                        retrieval_query="corrective question",
+                    ),
+                ],
+            )
+        ],
+    )
+
+    class DegradedRunService:
+        def run(self, question: str, *, response_language: str | None = None) -> StubRun:
+            return StubRun(
+                stage_result=StageRunResult(
+                    request_id="1e7a9c2d-4f8d-4c18-9e66-8b1de3b7b216",
+                    target_stage="v2_2",
+                    execution_status="completed",
+                    answer_outcome="complete",
+                    final_answer=SynthesizedAnswer(answer="answer"),
+                ),
+                tasks=(task,),
+            )
+
+    report = evaluate_module6(
+        "question",
+        service=DegradedRunService(),
+        output_root=tmp_path,
+        run_id="degraded-run",
+    )
+    assert report["metrics"]["degraded_retrieval_count"] == 1

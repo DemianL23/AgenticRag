@@ -9,6 +9,7 @@ from langgraph.graph import END, START, StateGraph
 from .config import V2Config
 from .answering import (
     FindingGenerator,
+    HITLContentGenerator,
     SynthesisGenerator,
     build_answer_limitations,
     build_hitl_request,
@@ -376,6 +377,7 @@ def build_graph_v2_2(
     recovery: RecoveryService | None = None,
     finding: FindingGenerator | None = None,
     synthesis: SynthesisGenerator | None = None,
+    hitl: HITLContentGenerator | None = None,
 ):
     """Build the non-persistent V2.2 Recovery → Finding → Answer graph."""
     config = config or V2Config.from_env()
@@ -388,6 +390,7 @@ def build_graph_v2_2(
     recovery = recovery or RecoveryService(config)
     finding = finding or FindingGenerator(config)
     synthesis = synthesis or SynthesisGenerator(config)
+    hitl = hitl or HITLContentGenerator(config)
 
     workflow = StateGraph(V2State)
     workflow.add_node("initialize", lambda state: {})
@@ -397,12 +400,18 @@ def build_graph_v2_2(
     workflow.add_node("grade", lambda state: _grade_node(state, grader))
     workflow.add_node("route", lambda state: _route_node(state, config))
     workflow.add_node("recover", lambda state: _recover_node(state, recovery))
-    workflow.add_node("terminalize_routes", lambda state: _terminalize_routes_node(state, config))
+    workflow.add_node(
+        "terminalize_routes",
+        lambda state: _terminalize_routes_node(
+            state, config, hitl, state["response_language"]
+        ),
+    )
     workflow.add_node("generate_findings", lambda state: _finding_node(state, finding))
     workflow.add_node("aggregate_outcomes", _aggregate_node)
     workflow.add_node("simple_answer", lambda state: _simple_answer_node(state))
     workflow.add_node("synthesize", lambda state: _synthesis_node(state, synthesis))
     workflow.add_node("terminal_answer", _terminal_answer_node)
+    workflow.add_node("waiting_finalize", _waiting_finalize_node)
     workflow.add_node("validate_final_answer", _validate_final_answer_node)
     workflow.add_node("stage_finalize", _finalize_v22_node)
 
@@ -433,9 +442,14 @@ def build_graph_v2_2(
     workflow.add_conditional_edges(
         "terminalize_routes",
         _continue_after_terminalize_v22,
-        {"waiting": "stage_finalize", "findings": "generate_findings"},
+        {"waiting": "waiting_finalize", "findings": "generate_findings"},
     )
-    workflow.add_edge("generate_findings", "aggregate_outcomes")
+    workflow.add_conditional_edges(
+        "generate_findings",
+        _continue_after_findings_v22,
+        {"waiting": "waiting_finalize", "aggregate": "aggregate_outcomes"},
+    )
+    workflow.add_edge("waiting_finalize", "stage_finalize")
     workflow.add_conditional_edges(
         "aggregate_outcomes",
         _continue_after_aggregate_v22,
@@ -468,7 +482,20 @@ def _continue_after_route_v22(
 def _continue_after_terminalize_v22(
     state: V2State,
 ) -> Literal["waiting", "findings"]:
+    if any(
+        task.execution_status != "failed"
+        and task.routing_decisions
+        and task.routing_decisions[-1].route == "answer"
+        for task in _ordered_tasks(state)
+    ):
+        return "findings"
     return "waiting" if state["execution_status"] == "waiting_user" else "findings"
+
+
+def _continue_after_findings_v22(
+    state: V2State,
+) -> Literal["waiting", "aggregate"]:
+    return "waiting" if state.get("pending_hitl_request") is not None else "aggregate"
 
 
 def _continue_after_aggregate_v22(
@@ -535,7 +562,12 @@ def _recover_node(state: V2State, recovery: RecoveryService) -> dict[str, object
     return output
 
 
-def _terminalize_routes_node(state: V2State, config: V2Config) -> dict[str, object]:
+def _terminalize_routes_node(
+    state: V2State,
+    config: V2Config,
+    hitl: HITLContentGenerator,
+    response_language: str,
+) -> dict[str, object]:
     task_updates: dict[str, RetrievalTask] = {}
     waiting_tasks: dict[str, RetrievalTask] = {}
     first_error: ExecutionError | None = None
@@ -590,9 +622,17 @@ def _terminalize_routes_node(state: V2State, config: V2Config) -> dict[str, obje
                 tasks=merged_tasks,
                 evidence_by_id=state.get("evidence", {}),
                 max_scope_options=config.budgets.max_scope_options,
+                response_language=response_language,
+                generator=hitl,
             )
             output["pending_hitl_request"] = pending
-            output["execution_status"] = "waiting_user"
+            if not any(
+                task.execution_status != "failed"
+                and task.routing_decisions
+                and task.routing_decisions[-1].route == "answer"
+                for task in task_updates.values()
+            ):
+                output["execution_status"] = "waiting_user"
         except Exception as exc:
             error = ExecutionError(
                 code="hitl_payload_invalid",
@@ -611,6 +651,15 @@ def _terminalize_routes_node(state: V2State, config: V2Config) -> dict[str, obje
     if first_error is not None:
         output["error"] = first_error
     return output
+
+
+def _waiting_finalize_node(state: V2State) -> dict[str, object]:
+    """End a V2.2 run at HITL while retaining any completed task Findings."""
+    return {
+        "execution_status": "waiting_user",
+        "answer_outcome": None,
+        "final_answer": None,
+    }
 
 
 def _finding_node(state: V2State, generator: FindingGenerator) -> dict[str, object]:

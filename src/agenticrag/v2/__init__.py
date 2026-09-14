@@ -9,6 +9,7 @@ from .graph import build_graph_v2_2, initial_v2_2_state
 from .answering import (
     AnswerGenerationError,
     FindingGenerator,
+    HITLContentGenerator,
     SynthesisGenerator,
     validate_synthesized_answer,
 )
@@ -71,6 +72,7 @@ __all__ = [
     "initial_v2_2_state",
     "AnswerGenerationError",
     "FindingGenerator",
+    "HITLContentGenerator",
     "SynthesisGenerator",
     "validate_synthesized_answer",
     "MaterializationError",

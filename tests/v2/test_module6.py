@@ -4,6 +4,7 @@ import pytest
 
 from agenticrag.v2.answering import (
     FindingGenerator,
+    HITLContentGenerator,
     SynthesisGenerator,
     build_finding_prompt,
     build_synthesis_prompt,
@@ -166,6 +167,7 @@ def _run_service(
     synthesis_model: SequenceStructuredModel | None = None,
     backend: FakeBackend | None = None,
     recovery: RecoveryService | None = None,
+    hitl_model: SequenceStructuredModel | None = None,
 ) -> tuple[Module6Service, object]:
     config = V2Config()
     backend = backend or FakeBackend()
@@ -176,6 +178,9 @@ def _run_service(
         grader=grader,
         recovery=recovery,
         finding=FindingGenerator(config, model=finding_model),
+        hitl=HITLContentGenerator(config, model=hitl_model)
+        if hitl_model is not None
+        else None,
         synthesis=SynthesisGenerator(config, model=synthesis_model)
         if synthesis_model is not None
         else None,
@@ -384,7 +389,10 @@ def test_clarify_and_scope_select_return_non_resumable_waiting_result() -> None:
         missing_slots=["year"],
     )
     _, clarify = _run_service(
-        _simple_plan(), StaticGrader([clarify_grade]), SequenceStructuredModel([])
+        _simple_plan(),
+        StaticGrader([clarify_grade]),
+        SequenceStructuredModel([]),
+        hitl_model=SequenceStructuredModel([{"question": "Which year?"}]),
     )
     assert clarify.stage_result.execution_status == "waiting_user"
     assert clarify.stage_result.answer_outcome is None
@@ -399,12 +407,112 @@ def test_clarify_and_scope_select_return_non_resumable_waiting_result() -> None:
         ambiguity="multiple_candidates",
     )
     _, scope = _run_service(
-        _simple_plan(), StaticGrader([scope_grade]), SequenceStructuredModel([])
+        _simple_plan(),
+        StaticGrader([scope_grade]),
+        SequenceStructuredModel([]),
+        hitl_model=SequenceStructuredModel(
+            [
+                {
+                    "options": [
+                        {
+                            "label": "营业利润",
+                            "value": "operating profit",
+                            "description": "营业利润口径",
+                            "evidence_ids": ["evidence-question"],
+                        },
+                        {
+                            "label": "净利润",
+                            "value": "net profit",
+                            "description": "净利润口径",
+                            "evidence_ids": ["evidence-question"],
+                        },
+                    ]
+                }
+            ]
+        ),
     )
     assert scope.stage_result.execution_status == "waiting_user"
     assert scope.stage_result.pending_hitl_request is not None
     assert scope.stage_result.pending_hitl_request.items[0].action == "scope_select"
     assert len(scope.stage_result.pending_hitl_request.items[0].scope_options) >= 2
+
+
+def test_mixed_answer_and_clarify_preserves_answer_finding_before_waiting() -> None:
+    grader = StaticGrader([
+        _grade("evidence-A"),
+        _grade(
+            answerability="none",
+            supporting=[],
+            ambiguity="missing_slot",
+            missing_slots=["year"],
+        ),
+    ])
+    finding_model = SequenceStructuredModel([
+        {"text": "finding A", "evidence_ids": ["evidence-A"]}
+    ])
+    hitl_model = SequenceStructuredModel([{"question": "Which year?"}])
+
+    _, result = _run_service(
+        _complex_plan("A", "B"),
+        grader,
+        finding_model,
+        hitl_model=hitl_model,
+    )
+
+    tasks = {task.id: task for task in result.tasks}
+    assert tasks["SQ_001"].grounded_finding is not None
+    assert tasks["SQ_002"].execution_status == "waiting_user"
+    assert result.stage_result.execution_status == "waiting_user"
+    assert result.stage_result.answer_outcome is None
+    assert result.stage_result.final_answer is None
+    assert result.stage_result.resumable is False
+    assert finding_model.calls == 1
+
+
+def test_mixed_answer_and_scope_select_preserves_answer_finding_before_waiting() -> None:
+    grader = StaticGrader([
+        _grade("evidence-A"),
+        _grade(answerability="none", supporting=[], ambiguity="multiple_candidates"),
+    ])
+    finding_model = SequenceStructuredModel([
+        {"text": "finding A", "evidence_ids": ["evidence-A"]}
+    ])
+    hitl_model = SequenceStructuredModel(
+        [
+            {
+                "options": [
+                    {
+                        "label": "口径 A",
+                        "value": "metric A",
+                        "description": "第一个合理口径",
+                        "evidence_ids": ["evidence-B"],
+                    },
+                    {
+                        "label": "口径 B",
+                        "value": "metric B",
+                        "description": "第二个合理口径",
+                        "evidence_ids": ["evidence-B"],
+                    },
+                ]
+            }
+        ]
+    )
+
+    _, result = _run_service(
+        _complex_plan("A", "B"),
+        grader,
+        finding_model,
+        hitl_model=hitl_model,
+    )
+
+    tasks = {task.id: task for task in result.tasks}
+    assert tasks["SQ_001"].grounded_finding is not None
+    assert tasks["SQ_002"].execution_status == "waiting_user"
+    assert result.stage_result.execution_status == "waiting_user"
+    assert result.stage_result.final_answer is None
+    assert result.stage_result.pending_hitl_request is not None
+    assert result.stage_result.pending_hitl_request.items[0].action == "scope_select"
+    assert finding_model.calls == 1
 
 
 def test_recovery_integration_creates_attempt_two_then_finding() -> None:

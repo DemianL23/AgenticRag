@@ -60,6 +60,7 @@ def evaluate_module6(
             "decomposer": config.decision_models.decomposer.model_dump(mode="json"),
             "grader": config.decision_models.grader.model_dump(mode="json"),
             "rewrite": config.decision_models.rewrite.model_dump(mode="json"),
+            "hitl": config.decision_models.hitl.model_dump(mode="json"),
             "simple_answer": config.answer_models.simple_answer.model_dump(mode="json"),
             "finding": config.answer_models.finding.model_dump(mode="json"),
             "synthesis": config.answer_models.synthesis.model_dump(mode="json"),
@@ -74,7 +75,10 @@ def evaluate_module6(
             "technical_failure_count": sum(task.execution_status == "failed" for task in tasks)
             or int(result.stage_result.execution_status == "failed"),
             "degraded_retrieval_count": sum(
-                item.retrieval_degraded for item in result.retrieval_results.values()
+                attempt.retrieval_degraded
+                for task in tasks
+                for revision in task.query_revisions
+                for attempt in revision.retrieval_attempts
             ),
             "invariant_violation_count": len(violations),
         },
