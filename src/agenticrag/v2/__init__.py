@@ -21,6 +21,7 @@ from .module4 import (
     unsupported_routing_decision,
 )
 from .module6 import Module6Run, Module6Service
+from .hitl import HITLResumeError, HITLResumeResult, HITLResumeService, await_user_input
 from .retrieval import (
     RetrievalBackendError,
     RetrievalFanoutResult,
@@ -82,6 +83,10 @@ __all__ = [
     "unsupported_routing_decision",
     "Module6Run",
     "Module6Service",
+    "HITLResumeError",
+    "HITLResumeResult",
+    "HITLResumeService",
+    "await_user_input",
     "RetrievalBackendError",
     "RetrievalFanoutResult",
     "RetrievalFanoutService",

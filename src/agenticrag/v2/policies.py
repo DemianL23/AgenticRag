@@ -249,15 +249,20 @@ def validate_resume_request(
     if resume.hitl_request_id != pending.id:
         raise ValueError("Resume hitl_request_id 不匹配")
     by_id = {item.id: item for item in pending.items}
-    if set(by_id) != {response.item_id for response in resume.responses}:
+    response_ids = [response.item_id for response in resume.responses]
+    if len(response_ids) != len(set(response_ids)):
+        raise ValueError("Resume responses 不得重复 item_id")
+    if set(by_id) != set(response_ids):
         raise ValueError("Resume responses 必须与 HITL items 一一对应")
     for response in resume.responses:
         item = by_id[response.item_id]
         if item.action == "clarify":
             if response.clarify_values is None:
                 raise ValueError("clarify 必须提交 clarify_values")
-            if set(item.missing_slots) - set(response.clarify_values):
-                raise ValueError("clarify_values 未覆盖全部 missing_slots")
+            response_slots = set(response.clarify_values)
+            required_slots = set(item.missing_slots)
+            if response_slots != required_slots:
+                raise ValueError("clarify_values 必须且只能覆盖全部 missing_slots")
             if response.selected_option_id is not None:
                 raise ValueError("clarify 不允许提交 option")
         else:
