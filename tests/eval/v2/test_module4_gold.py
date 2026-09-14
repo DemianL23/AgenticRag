@@ -197,13 +197,30 @@ def test_authoring_refuses_existing_output_without_force(tmp_path: Path) -> None
     source_path.write_text(json.dumps(_source_report()), encoding="utf-8")
     output_path.write_text("sentinel\n", encoding="utf-8")
 
-    with pytest.raises(FileExistsError, match="Refusing to overwrite"):
+    with pytest.raises(FileExistsError, match="Refusing to write protected Gold output"):
         author_gold_dataset(
             source_path,
             output_path=output_path,
             judge=_FakeGoldJudge(_expected_answer().as_grade()),
         )
     assert output_path.read_text(encoding="utf-8") == "sentinel\n"
+
+
+def test_authoring_protects_frozen_gold_path_without_force(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source_path = tmp_path / "source-report.json"
+    source_path.write_text(json.dumps(_source_report()), encoding="utf-8")
+    frozen_path = tmp_path / "frozen-gold.jsonl"
+    monkeypatch.setattr("eval.v2.module4_gold.DEFAULT_GOLD_DATASET", frozen_path)
+
+    with pytest.raises(FileExistsError, match="protected Gold output"):
+        author_gold_dataset(
+            source_path,
+            output_path=frozen_path,
+            judge=_FakeGoldJudge(_expected_answer().as_grade()),
+        )
+    assert not frozen_path.exists()
 
 
 def test_authoring_force_allows_existing_output(tmp_path: Path) -> None:

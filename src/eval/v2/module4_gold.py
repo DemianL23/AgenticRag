@@ -390,9 +390,12 @@ def author_gold_dataset(
 ) -> dict[str, Any]:
     if output_path is None:
         output_path = DEFAULT_CANDIDATE_ROOT / str(uuid4()) / "candidate.jsonl"
-    elif output_path.exists() and not force:
+    elif not force and (
+        output_path.resolve() == DEFAULT_GOLD_DATASET.resolve()
+        or output_path.exists()
+    ):
         raise FileExistsError(
-            f"Refusing to overwrite existing Gold output: {output_path}. "
+            f"Refusing to write protected Gold output: {output_path}. "
             "Pass force=True (CLI: --force) explicitly to overwrite."
         )
     source_report = json.loads(source_report_path.read_text())
