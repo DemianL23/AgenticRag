@@ -7,6 +7,7 @@ run directory.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import subprocess
 from collections import Counter
@@ -101,7 +102,9 @@ def build_module8_report(
                 else None
             ),
         }
-    return {
+    report = {
+        "report_schema_version": 1,
+        "producer": "v2_3_stage_evaluator",
         "run_id": run_id,
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "git_commit": _git_commit(),
@@ -156,7 +159,21 @@ def build_module8_report(
             ),
             "invariant_violation_count": 0,
         },
+        "artifact_digest": "",
     }
+    report["artifact_digest"] = _report_digest(report)
+    return report
+
+
+def _report_digest(report: dict[str, Any]) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            {**report, "artifact_digest": ""},
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+    ).hexdigest()
 
 
 def main() -> None:

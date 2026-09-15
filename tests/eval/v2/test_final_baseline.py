@@ -7,27 +7,275 @@ import pytest
 from types import SimpleNamespace
 
 from agenticrag.v2.config import V2Config
-from agenticrag.v2.schemas import Evidence, EvidenceOccurrence, GroundedFinding, RetrievalTask, StageRunResult, SynthesizedAnswer
+from agenticrag.v2.schemas import (
+    Evidence,
+    EvidenceGrade,
+    EvidenceOccurrence,
+    GradeRecord,
+    GroundedFinding,
+    QueryRevision,
+    RetrievalAttempt,
+    RetrievalTask,
+    StageRunResult,
+    SynthesizedAnswer,
+)
 import eval.v2.final_baseline as baseline
 from eval.v2.final_baseline import (
+    ANNOTATION_DATASET,
+    FROZEN_ANNOTATION_DATASET_SHA256,
+    FROZEN_MODULE4_GOLD_SHA256,
     FROZEN_RETRIEVAL_METRICS,
+    MODULE4_GOLD_DATASET,
+    MODULE8_FROZEN_IMPLEMENTATION_SHA,
+    QA_DATASET,
     RETRIEVAL_DATASET,
     DEFAULT_DATASET,
     _check_cross_process_gate,
+    _check_frozen_dataset_integrity,
     _check_retrieval_gate,
     _computation_gate,
     _audit_tasks,
+    _json_digest,
     evaluate_baseline,
     load_workflow_scenarios,
     scenario_coverage,
 )
 
 
+def _write_json(path: Path, payload: dict[str, object]) -> Path:
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    return path
+
+
+def _signed_report(
+    payload: dict[str, object], *, producer: str, config: V2Config | None = None
+) -> dict[str, object]:
+    report = {
+        **payload,
+        "report_schema_version": 1,
+        "producer": producer,
+        "git_commit": baseline._git_commit() or "0" * 40,
+        "git_dirty": False,
+        "resolved_config": (config or V2Config()).resolved_record(),
+        "artifact_digest": "",
+    }
+    report["artifact_digest"] = _json_digest(report)
+    return report
+
+
+def _valid_retrieval_report(path: Path) -> Path:
+    return _write_json(
+        path,
+        {
+            "dataset": str(RETRIEVAL_DATASET),
+            "dataset_size": 47,
+            "evaluated_queries": 47,
+            "fallback_queries": 0,
+            "invalid_score_queries": 0,
+            "final_metrics": {
+                key: value
+                for key, value in FROZEN_RETRIEVAL_METRICS.items()
+                if key != "Recall@20"
+            },
+            "rrf_candidate_metrics": {
+                "Recall@20": FROZEN_RETRIEVAL_METRICS["Recall@20"]
+            },
+        },
+    )
+
+
+def _valid_cross_process_report(path: Path, *, git_commit: str) -> Path:
+    request_id = "8db660d1-9b3b-4d68-8dca-73b32bd5374e"
+    payload: dict[str, object] = {
+        "schema_version": 1,
+        "producer": "module8_cross_process_acceptance",
+        "run_id": "cross-process-run",
+        "git_commit": git_commit,
+        "request_id": request_id,
+        "thread_id": request_id,
+        "steps": [
+            {
+                "name": name,
+                "passed": True,
+                "request_id": request_id,
+                "thread_id": request_id,
+            }
+            for name in ("start", "status_waiting", "resume", "status_completed")
+        ],
+        "duplicate_resume_passed": True,
+        "stale_resume_passed": True,
+        "invalid_payload_passed": True,
+        "expired_checkpoint_passed": True,
+        "lease_recovery_passed": True,
+        "artifact_digest": "",
+    }
+    payload["artifact_digest"] = _json_digest(
+        {key: value for key, value in payload.items() if key != "artifact_digest"}
+    )
+    return _write_json(path, payload)
+
+
+def _valid_evaluator_and_stage_reports(root: Path) -> dict[str, Path]:
+    annotation_ids = [
+        json.loads(line)["finqa_id"]
+        for line in ANNOTATION_DATASET.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    planning = _write_json(
+        root / "planning.json",
+        _signed_report({
+            "run_id": "planning-run",
+            "dataset": {
+                "qa_sha256": baseline._sha256(QA_DATASET),
+                "annotation_sha256": FROZEN_ANNOTATION_DATASET_SHA256,
+            },
+            "metrics": {
+                "complexity_accuracy": 0.8,
+                "simple_capability_correct": 5,
+                "simple_capability_total": 6,
+                "complex_task_capability_correct": 10,
+                "complex_task_capability_total": 12,
+                "micro_pipeline_requirement_coverage": 0.75,
+            },
+            "structural_violations": {"empty_task_violations": 0},
+            "evaluation_incomplete": False,
+        }, producer="module2_planning_evaluator"),
+    )
+    module4 = _write_json(
+        root / "module4.json",
+        _signed_report({
+            "run_id": "module4-run",
+            "dataset": {"sha256": FROZEN_MODULE4_GOLD_SHA256},
+            "metrics": {
+                name: 1.0
+                for name in (
+                    "relevance_accuracy",
+                    "answerability_accuracy",
+                    "ambiguity_accuracy",
+                    "recoverability_accuracy",
+                    "failure_reason_accuracy",
+                    "grade_exact_match_accuracy",
+                    "route_accuracy",
+                    "recovery_strategy_accuracy",
+                )
+            },
+            "evaluation_incomplete": False,
+        }, producer="module4_gold_replay_evaluator"),
+    )
+    answer = _write_json(
+        root / "answer.json",
+        _signed_report({
+            "run_id": "answer-run",
+            "dataset": {
+                "qa_sha256": baseline._sha256(QA_DATASET),
+                "annotation_sha256": FROZEN_ANNOTATION_DATASET_SHA256,
+                "sample_count": len(annotation_ids),
+            },
+            "metrics": {
+                "supported_subset_ragas": {
+                    "faithfulness": 0.9,
+                    "answer_correctness": 0.8,
+                },
+                "outcome_accuracy": 0.9,
+                "unsupported_computation_recall": 1.0,
+                "abstention_correctness": 1.0,
+            },
+            "evaluation_incomplete": False,
+        }, producer="v2_answer_ragas_evaluator"),
+    )
+    v21 = _write_json(
+        root / "v21.json",
+        _signed_report({
+            "run_id": "v21-run",
+            "target_stage": "v2_1",
+            "metrics": {
+                "retrieval_completed_count": 1,
+                "grader_completed_count": 1,
+                "technical_failure_count": 0,
+                "degraded_retrieval_count": 0,
+                "invariant_violation_count": 0,
+            },
+            "evaluation_incomplete": False,
+        }, producer="v2_1_stage_evaluator"),
+    )
+    v22 = _write_json(
+        root / "v22.json",
+        _signed_report({
+            "run_id": "v22-run",
+            "target_stage": "v2_2",
+            "metrics": {
+                "recovery_count": 1,
+                "finding_count": 1,
+                "technical_failure_count": 0,
+                "invariant_violation_count": 0,
+            },
+        }, producer="v2_2_stage_evaluator"),
+    )
+    v23 = _write_json(
+        root / "v23.json",
+        _signed_report({
+            "run_id": "v23-run",
+            "target_stage": "v2_3",
+            "metrics": {
+                "interrupt_count": 1,
+                "resume_count": 1,
+                "final_execution_status": "completed",
+                "invariant_violation_count": 0,
+            },
+        }, producer="v2_3_stage_evaluator"),
+    )
+    return {
+        "planning_report": planning,
+        "module4_gold_report": module4,
+        "answer_ragas_report": answer,
+        "stage_v21_report": v21,
+        "stage_v22_report": v22,
+        "stage_v23_report": v23,
+    }
+
+
+def _passing_scenario_prediction(
+    scenario: object, _config: object
+) -> dict[str, object]:
+    expected = scenario.expected.model_dump(mode="json")
+    return {
+        "scenario_id": scenario.scenario_id,
+        "mode": scenario.mode,
+        "stage": scenario.stage,
+        "expected_capability": scenario.capability,
+        "passed": True,
+        "status": (
+            "technical_failure"
+            if scenario.expected.technical_failure
+            else scenario.expected.execution_status
+        ),
+        "expected": expected,
+        "observed": {
+            "answer_outcome": scenario.expected.answer_outcome,
+            "task_capabilities": (
+                [scenario.capability]
+                if scenario.capability != "mixed"
+                else ["retrieval_synthesis", "arithmetic"]
+            ),
+            "route": scenario.expected.route,
+            "route_sequence": scenario.expected.route_sequence,
+            "retrieval_attempt_count": scenario.expected.retrieval_attempt_count or 0,
+            "schema_invariant_violation_count": 0,
+            "provenance_violation_count": 0,
+            "citation_violation_count": 0,
+            "budget_violation_count": 0,
+            "degraded_retrieval_count": 0,
+        },
+        "violations": [],
+        "elapsed_seconds": 0.0,
+    }
+
+
 def test_workflow_scenario_dataset_has_explicit_coverage() -> None:
     records = load_workflow_scenarios(DEFAULT_DATASET)
     coverage = scenario_coverage(records)
-    assert coverage["scenario_count"] == 29
-    assert coverage["stage_counts"] == {"v2_1": 2, "v2_2": 17, "v2_3": 10}
+    assert coverage["scenario_count"] == 30
+    assert coverage["stage_counts"] == {"v2_1": 2, "v2_2": 19, "v2_3": 9}
     for tag in (
         "recovery_direct_rewrite",
         "recovery_step_back",
@@ -90,12 +338,15 @@ def test_contract_baseline_report_is_immutable_and_contains_digests(tmp_path: Pa
         config=V2Config(),
         retrieval_report=retrieval_report,
     )
-    assert report["metrics"]["contract_scenario_count"] == 26
+    assert report["metrics"]["contract_scenario_count"] == 27
     assert report["metrics"]["technical_failure_count"] == 0
     assert report["hard_gates"]["dataset_schema_and_coverage"] is True
     assert report["hard_gates"]["v1_2_retrieval_regression"] is True
     assert report["hard_gates"]["baseline_scenarios_terminal_contract"] is True
     assert report["hard_gates"]["v2_3_cross_process"] is False
+    assert report["evaluation_profile"] == "development_contract"
+    assert report["evaluation_incomplete"] is True
+    assert report["freeze_eligible"] is False
     assert len(report["digests"]["dataset_sha256"]) == 64
     assert len(report["artifact_digest"]) == 64
     assert {item["name"] for item in report["dataset_records"]} >= {
@@ -107,6 +358,8 @@ def test_contract_baseline_report_is_immutable_and_contains_digests(tmp_path: Pa
     }
     report_path = tmp_path / "reports" / "candidate-1" / "report.json"
     assert json.loads(report_path.read_text(encoding="utf-8"))["digests"] == report["digests"]
+    assert all(item["evaluation_complete"] is False for item in report["stage_reports"])
+    assert not (report_path.parent / "stage_v2_1.json").exists()
     with pytest.raises(FileExistsError):
         evaluate_baseline(
             dataset_path=DEFAULT_DATASET,
@@ -121,7 +374,7 @@ def test_contract_baseline_report_is_immutable_and_contains_digests(tmp_path: Pa
 def test_real_mode_is_explicitly_separate_from_contract_mode(tmp_path: Path) -> None:
     records = load_workflow_scenarios(DEFAULT_DATASET)
     assert sum(record.mode == "real" for record in records) == 3
-    assert sum(record.mode == "contract" for record in records) == 26
+    assert sum(record.mode == "contract" for record in records) == 27
 
 
 def test_contract_scenarios_execute_frozen_graph_and_recovery_history(tmp_path: Path) -> None:
@@ -141,7 +394,7 @@ def test_contract_scenarios_execute_frozen_graph_and_recovery_history(tmp_path: 
     assert recovery["observed"]["route_sequence"] == ["recover", "answer"]
     assert recovery["observed"]["recovery_strategies"] == ["direct_rewrite"]
     assert recovery["observed"]["telemetry"]["retrieval_calls"] == 2
-    assert report["metrics"]["scenario_pass_count"] == 26
+    assert report["metrics"]["scenario_pass_count"] == 27
 
 
 def test_weak_47_query_retrieval_report_fails_regression_gate(tmp_path: Path) -> None:
@@ -212,7 +465,7 @@ def test_report_digest_round_trip_and_immutable_output(tmp_path: Path) -> None:
 
 
 def test_wrong_computation_answer_fails_computation_gate() -> None:
-    predictions = [{"scenario_id": "contract_unsupported_arithmetic", "observed": {"answer_outcome": "complete"}}]
+    predictions = [{"scenario_id": "contract_unsupported_arithmetic", "expected_capability": "arithmetic", "observed": {"answer_outcome": "complete", "task_capabilities": ["arithmetic"]}}]
     assert _computation_gate(predictions) is False
 
 
@@ -233,3 +486,303 @@ def test_git_dirty_disqualifies_candidate(monkeypatch: pytest.MonkeyPatch, tmp_p
     assert report["git_dirty"] is True
     assert report["freeze_eligible"] is False
     assert report["baseline_status"] == "not_eligible"
+
+
+def test_contract_only_is_never_eligible_even_with_valid_cross_evidence(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    commit = "c" * 40
+    monkeypatch.setattr(baseline, "_git_commit", lambda: commit)
+    monkeypatch.setattr(baseline, "_git_dirty", lambda: False)
+    reports = _valid_evaluator_and_stage_reports(tmp_path)
+    result = evaluate_baseline(
+        output_root=tmp_path / "out",
+        run_id="contract-only",
+        mode="contract",
+        config=V2Config(),
+        retrieval_report=_valid_retrieval_report(tmp_path / "retrieval.json"),
+        cross_process_report=_valid_cross_process_report(
+            tmp_path / "cross.json", git_commit=commit
+        ),
+        **reports,
+    )
+    assert result["evaluation_profile"] == "development_contract"
+    assert result["evaluation_incomplete"] is True
+    assert result["freeze_eligible"] is False
+
+
+def test_real_only_profile_is_never_eligible(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    def fake_real(scenario: object, _config: object) -> dict[str, object]:
+        return {
+            "scenario_id": scenario.scenario_id,
+            "mode": "real",
+            "stage": scenario.stage,
+            "expected_capability": scenario.capability,
+            "passed": True,
+            "status": scenario.expected.execution_status,
+            "expected": scenario.expected.model_dump(mode="json"),
+            "observed": {
+                "answer_outcome": scenario.expected.answer_outcome,
+                "task_capabilities": [scenario.capability],
+            },
+            "violations": [],
+            "elapsed_seconds": 0.0,
+        }
+
+    monkeypatch.setattr(baseline, "_real_prediction", fake_real)
+    monkeypatch.setattr(baseline, "_git_dirty", lambda: False)
+    result = evaluate_baseline(
+        output_root=tmp_path / "out",
+        run_id="real-only",
+        mode="real",
+        config=V2Config(),
+    )
+    assert result["evaluation_profile"] == "development_real"
+    assert result["evaluation_incomplete"] is True
+    assert result["freeze_eligible"] is False
+
+
+def test_full_profile_missing_planning_evaluation_is_incomplete(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(baseline, "_git_dirty", lambda: False)
+    monkeypatch.setattr(baseline, "_contract_prediction", _passing_scenario_prediction)
+    monkeypatch.setattr(baseline, "_real_prediction", _passing_scenario_prediction)
+    reports = _valid_evaluator_and_stage_reports(tmp_path)
+    reports["planning_report"] = tmp_path / "missing-planning.json"
+    result = evaluate_baseline(
+        output_root=tmp_path / "out",
+        run_id="missing-planning",
+        profile="full_baseline",
+        config=V2Config(),
+        **reports,
+    )
+    assert result["metrics"]["planning"]["complexity_accuracy"] is None
+    assert result["evaluation_completeness"]["planning_evaluator_evaluated"] is False
+    assert result["evaluation_incomplete"] is True
+
+
+def test_actual_planning_and_module4_artifact_metrics_are_populated(
+    tmp_path: Path,
+) -> None:
+    reports = _valid_evaluator_and_stage_reports(tmp_path)
+    result = evaluate_baseline(
+        output_root=tmp_path / "out",
+        run_id="integrated-metrics",
+        mode="contract",
+        config=V2Config(),
+        **reports,
+    )
+    assert result["metrics"]["planning"] == {
+        "complexity_accuracy": 0.8,
+        "capability_accuracy": 15 / 18,
+        "decomposition_requirement_coverage": 0.75,
+        "structural_violation_counts": {"empty_task_violations": 0},
+    }
+    assert result["metrics"]["evidence_route"]["route_accuracy"] == 1.0
+    assert result["metrics"]["evidence_route"]["grade_exact_match_accuracy"] == 1.0
+    assert result["metrics"]["answer"]["supported_subset_ragas"] == {
+        "faithfulness": 0.9,
+        "answer_correctness": 0.8,
+    }
+
+
+def test_missing_answer_evaluator_is_unavailable_not_zero(tmp_path: Path) -> None:
+    result = evaluate_baseline(
+        output_root=tmp_path / "out",
+        run_id="missing-answer",
+        mode="contract",
+        config=V2Config(),
+    )
+    assert result["metrics"]["answer"]["supported_subset_ragas"] is None
+    assert result["evaluation_completeness"]["answer_ragas_evaluator_evaluated"] is False
+    assert result["evaluation_incomplete"] is True
+
+
+def test_terminal_unresolved_tag_rejects_waiting_user(tmp_path: Path) -> None:
+    records = [
+        json.loads(line)
+        for line in DEFAULT_DATASET.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    target = next(item for item in records if item["scenario_id"] == "contract_unresolved_success")
+    target["expected"].update(
+        execution_status="waiting_user", answer_outcome=None, resumable=True
+    )
+    path = tmp_path / "invalid-unresolved.jsonl"
+    path.write_text("".join(json.dumps(item) + "\n" for item in records))
+    with pytest.raises(ValueError, match="terminal_unresolved"):
+        load_workflow_scenarios(path)
+
+
+def test_true_hitl_budget_exhaustion_and_bounded_recovery_are_executed(
+    tmp_path: Path,
+) -> None:
+    evaluate_baseline(
+        output_root=tmp_path / "out",
+        run_id="history",
+        mode="contract",
+        config=V2Config(),
+    )
+    predictions = {
+        item["scenario_id"]: item
+        for item in map(
+            json.loads,
+            (tmp_path / "out" / "history" / "predictions.jsonl").read_text().splitlines(),
+        )
+    }
+    unresolved = predictions["contract_unresolved_success"]
+    assert unresolved["observed"]["answer_outcome"] == "unresolved"
+    assert unresolved["observed"]["hitl_rounds"] == 1
+    assert unresolved["observed"]["query_revision_count"] == 2
+    for scenario_id in (
+        "contract_direct_boundary",
+        "contract_step_boundary",
+        "contract_hyde_boundary",
+    ):
+        item = predictions[scenario_id]
+        assert item["observed"]["route_sequence"][-2:] == ["recover", "no_knowledge"]
+        assert not any(attempt.endswith("_003") for attempt in item["observed"]["retrieval_attempt_ids"])
+
+
+@pytest.mark.parametrize(
+    ("dataset_name", "source_path"),
+    [
+        ("v2_qa_annotations", ANNOTATION_DATASET),
+        ("module4_grade_route_gold", MODULE4_GOLD_DATASET),
+    ],
+)
+def test_modified_frozen_dataset_fails_integrity(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    dataset_name: str,
+    source_path: Path,
+) -> None:
+    modified = tmp_path / source_path.name
+    modified.write_bytes(source_path.read_bytes() + b"\n")
+    if dataset_name == "v2_qa_annotations":
+        monkeypatch.setattr(baseline, "ANNOTATION_DATASET", modified)
+    else:
+        monkeypatch.setattr(baseline, "MODULE4_GOLD_DATASET", modified)
+    records = baseline._all_dataset_records(DEFAULT_DATASET)
+    result = _check_frozen_dataset_integrity(records)
+    assert result["passed"] is False
+    assert result["checks"][dataset_name] is False
+    report = evaluate_baseline(
+        output_root=tmp_path / "out",
+        run_id=f"integrity-{dataset_name}",
+        mode="contract",
+        config=V2Config(),
+    )
+    assert report["hard_gates"]["frozen_dataset_integrity"] is False
+    assert report["evaluation_incomplete"] is True
+    assert report["freeze_eligible"] is False
+
+
+def test_cross_process_evidence_enforces_git_identity(tmp_path: Path) -> None:
+    wrong = _valid_cross_process_report(tmp_path / "wrong.json", git_commit="f" * 40)
+    assert _check_cross_process_gate(
+        wrong, current_git_commit="c" * 40
+    )["passed"] is False
+    allowed = _valid_cross_process_report(
+        tmp_path / "allowed.json", git_commit=MODULE8_FROZEN_IMPLEMENTATION_SHA
+    )
+    result = _check_cross_process_gate(allowed, current_git_commit="c" * 40)
+    assert result["passed"] is True
+    assert result["git_commit_allowed"] is True
+
+
+def test_provenance_auditor_rejects_wrong_task_occurrence() -> None:
+    attempt = RetrievalAttempt(
+        id="ATT_SQ001_QR001_001",
+        ordinal=1,
+        strategy="original",
+        retrieval_query="q",
+        evidence_ids=["E1"],
+    )
+    revision = QueryRevision(
+        id="QR_SQ001_001",
+        ordinal=1,
+        source="original",
+        query="q",
+        retrieval_attempts=[attempt],
+    )
+    grade = EvidenceGrade(
+        relevance="strong",
+        answerability="sufficient",
+        ambiguity="none",
+        recoverability="none",
+        failure_reason="none",
+        reason="supported",
+        supporting_evidence_ids=["E1"],
+    )
+    record = GradeRecord(
+        id="GR_SQ001_001",
+        query_revision_id=revision.id,
+        input_attempt_ids=[attempt.id],
+        input_evidence_ids=["E1"],
+        grade=grade,
+    )
+    task = RetrievalTask(
+        id="SQ_001",
+        ordinal=1,
+        query="q",
+        intent="i",
+        capability="retrieval_synthesis",
+        query_revisions=[revision],
+        grade_records=[record],
+        grounded_finding=GroundedFinding(
+            task_id="SQ_001", text="fact", evidence_ids=["E1"]
+        ),
+    )
+    evidence = {
+        "E1": Evidence(
+            evidence_id="E1",
+            chunk_id="E1",
+            content="fact",
+            doc_id="d",
+            source="s",
+            page=1,
+            occurrences=[
+                EvidenceOccurrence(
+                    task_id="SQ_999",
+                    query_revision_id=revision.id,
+                    retrieval_attempt_id=attempt.id,
+                    strategy="original",
+                    final_rank=1,
+                )
+            ],
+        )
+    }
+    stage = SimpleNamespace(execution_status="completed", answer_outcome="complete", final_answer=None)
+    _, counts = _audit_tasks([task], evidence, stage, config=V2Config())
+    assert counts.provenance_violation_count == 1
+
+
+def test_only_full_baseline_profile_can_become_eligible(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    commit = "c" * 40
+    monkeypatch.setattr(baseline, "_git_commit", lambda: commit)
+    monkeypatch.setattr(baseline, "_git_dirty", lambda: False)
+
+    monkeypatch.setattr(baseline, "_contract_prediction", _passing_scenario_prediction)
+    monkeypatch.setattr(baseline, "_real_prediction", _passing_scenario_prediction)
+    reports = _valid_evaluator_and_stage_reports(tmp_path)
+    result = evaluate_baseline(
+        output_root=tmp_path / "out",
+        run_id="full",
+        profile="full_baseline",
+        config=V2Config(),
+        retrieval_report=_valid_retrieval_report(tmp_path / "retrieval.json"),
+        cross_process_report=_valid_cross_process_report(
+            tmp_path / "cross.json", git_commit=commit
+        ),
+        **reports,
+    )
+    assert result["evaluation_completeness"]["complete"] is True
+    assert result["evaluation_incomplete"] is False
+    assert result["freeze_eligible"] is True
+    assert result["baseline_status"] == "eligible"

@@ -48,6 +48,8 @@ def evaluate_module6(
         if len(revision.retrieval_attempts) == 2
     )
     report = {
+        "report_schema_version": 1,
+        "producer": "v2_2_stage_evaluator",
         "run_id": run_id,
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "git_commit": _git_commit(),
@@ -83,7 +85,9 @@ def evaluate_module6(
             "invariant_violation_count": len(violations),
         },
         "invariant_violations": violations,
+        "artifact_digest": "",
     }
+    report["artifact_digest"] = _report_digest(report)
     predictions = {
         "run_id": run_id,
         "question": question,
@@ -103,6 +107,17 @@ def evaluate_module6(
         json.dumps(predictions, ensure_ascii=False) + "\n", encoding="utf-8"
     )
     return report
+
+
+def _report_digest(report: dict[str, Any]) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            {**report, "artifact_digest": ""},
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+    ).hexdigest()
 
 
 def check_module6_invariants(result: Any) -> list[str]:

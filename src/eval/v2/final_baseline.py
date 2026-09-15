@@ -8,6 +8,7 @@ branches to the production runtime.
 from __future__ import annotations
 
 import hashlib
+import asyncio
 import json
 import subprocess
 import tempfile
@@ -18,7 +19,7 @@ from pathlib import Path
 from typing import Any, Literal
 from uuid import uuid4
 
-from pydantic import Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from agenticrag.v2.config import V2Config, V2PersistenceConfig
 from agenticrag.v2.durable import DurableV23Service
@@ -46,6 +47,9 @@ QA_DATASET = Path("qa.jsonl")
 ANNOTATION_DATASET = Path("eval/datasets/v2_qa_annotations.jsonl")
 MODULE4_GOLD_DATASET = Path("eval/datasets/v2_module4_grade_route_gold.jsonl")
 FROZEN_RETRIEVAL_DATASET_SHA256 = "61b366a7cac645df75b4549e6bd940b62757755974c0afcfa28a20e67196e2e5"
+FROZEN_ANNOTATION_DATASET_SHA256 = "2c3a638a36797454af081b851f0d78df3419f2b6f1d00766e561ac98b4bab639"
+FROZEN_MODULE4_GOLD_SHA256 = "b2204ec505d76c3fd57dd060378ea0e9e5946482e4987b6b0b6c6a58ff1e594c"
+MODULE8_FROZEN_IMPLEMENTATION_SHA = "891ef20d218ed3e01d7b3a54ac5b50bde628dc52"
 FROZEN_RETRIEVAL_METRICS = {
     "Recall@1": 0.28900709219858156,
     "Recall@3": 0.549645390070922,
@@ -57,6 +61,9 @@ FROZEN_RETRIEVAL_METRICS = {
 ScenarioMode = Literal["real", "contract"]
 ScenarioLanguage = Literal["zh", "en", "mixed"]
 FaultKind = Literal["none", "provider", "timeout", "schema", "retrieval"]
+EvaluationProfile = Literal[
+    "development_contract", "development_real", "full_baseline"
+]
 
 
 class ScenarioFixture(V2Model):
@@ -151,6 +158,7 @@ class ScenarioResult(V2Model):
     scenario_id: str
     mode: ScenarioMode
     stage: TargetStage
+    expected_capability: TaskCapability | Literal["mixed"]
     passed: bool
     status: str
     expected: dict[str, Any]
@@ -178,10 +186,72 @@ class HardGateResult(V2Model):
 
 class StageReportReference(V2Model):
     target_stage: TargetStage
-    run_id: str
-    path: str
-    digest: str = Field(pattern=r"^[0-9a-f]{64}$")
-    available: bool = True
+    run_id: str | None = None
+    path: str | None = None
+    digest: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    available: bool = False
+    evaluation_complete: bool = False
+    error: str | None = None
+
+
+class EvaluatorReportReference(V2Model):
+    evaluator: Literal["planning", "module4_grade_route", "answer_ragas"]
+    run_id: str | None = None
+    path: str | None = None
+    digest: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    available: bool = False
+    evaluation_complete: bool = False
+    error: str | None = None
+
+
+class ExternalReportEnvelope(BaseModel):
+    """Minimum common contract for immutable evaluator artifacts."""
+
+    model_config = ConfigDict(extra="allow")
+
+    report_schema_version: Literal[1]
+    producer: str
+    run_id: str = Field(min_length=1)
+    git_commit: str = Field(pattern=r"^[0-9a-f]{40}$")
+    git_dirty: bool
+    resolved_config: dict[str, Any]
+    artifact_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class EvaluationCompleteness(V2Model):
+    profile: EvaluationProfile
+    retrieval_regression_evaluated: bool
+    planning_evaluator_evaluated: bool
+    module4_grade_route_evaluator_evaluated: bool
+    answer_ragas_evaluator_evaluated: bool
+    workflow_contract_scenarios_evaluated: bool
+    required_real_model_scenarios_evaluated: bool
+    v2_3_cross_process_acceptance_evaluated: bool
+    required_datasets_integrity_validated: bool
+    stage_reports_evaluated: bool
+    complete: bool
+    missing_components: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_profile_completeness(self) -> "EvaluationCompleteness":
+        evaluated_components = (
+            self.retrieval_regression_evaluated,
+            self.planning_evaluator_evaluated,
+            self.module4_grade_route_evaluator_evaluated,
+            self.answer_ragas_evaluator_evaluated,
+            self.workflow_contract_scenarios_evaluated,
+            self.required_real_model_scenarios_evaluated,
+            self.v2_3_cross_process_acceptance_evaluated,
+            self.required_datasets_integrity_validated,
+            self.stage_reports_evaluated,
+        )
+        if self.profile != "full_baseline" and self.complete:
+            raise ValueError("development evaluation profile can never be complete")
+        if self.complete and not all(evaluated_components):
+            raise ValueError("complete evaluation requires every baseline component")
+        if self.complete and self.missing_components:
+            raise ValueError("complete evaluation cannot list missing components")
+        return self
 
 
 class CrossProcessStep(V2Model):
@@ -193,8 +263,10 @@ class CrossProcessStep(V2Model):
 
 
 class CrossProcessEvidence(V2Model):
+    schema_version: Literal[1]
+    producer: Literal["module8_cross_process_acceptance"]
     run_id: str
-    git_commit: str
+    git_commit: str = Field(pattern=r"^[0-9a-f]{40}$")
     request_id: str
     thread_id: str
     steps: list[CrossProcessStep] = Field(min_length=4)
@@ -212,8 +284,11 @@ class BaselineCandidateReport(V2Model):
     git_commit: str | None
     git_dirty: bool | None
     target: Literal["v2_final_baseline_candidate"]
+    evaluation_profile: EvaluationProfile
+    evaluation_completeness: EvaluationCompleteness
     dataset_records: list[DatasetRecord]
     stage_reports: list[StageReportReference]
+    evaluator_reports: list[EvaluatorReportReference]
     resolved_config: dict[str, Any]
     metrics: dict[str, Any]
     invariant_counts: InvariantCounts
@@ -228,6 +303,20 @@ class BaselineCandidateReport(V2Model):
     artifact_digest: str = Field(default="0" * 64, pattern=r"^[0-9a-f]{64}$")
     errors: list[dict[str, Any]] = Field(default_factory=list)
     digests: dict[str, str] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def validate_freeze_eligibility(self) -> "BaselineCandidateReport":
+        if self.freeze_eligible and (
+            self.evaluation_profile != "full_baseline"
+            or not self.evaluation_completeness.complete
+            or self.evaluation_incomplete
+            or self.git_dirty is not False
+            or not all(self.hard_gates.values())
+        ):
+            raise ValueError("freeze eligibility requires a complete clean full_baseline")
+        if (self.baseline_status == "eligible") != self.freeze_eligible:
+            raise ValueError("baseline_status and freeze_eligible disagree")
+        return self
 
 
 REQUIRED_COVERAGE_TAGS = (
@@ -276,6 +365,64 @@ def _validate_coverage(records: list[WorkflowScenario]) -> None:
         raise ValueError("workflow scenario coverage requires: " + ", ".join(missing))
     if {record.stage for record in records} != {"v2_1", "v2_2", "v2_3"}:
         raise ValueError("workflow scenarios must cover v2_1, v2_2, and v2_3")
+    unresolved = [record for record in records if "terminal_unresolved" in record.tags]
+    if len(unresolved) < 2 or any(
+        record.expected.execution_status != "completed"
+        or record.expected.answer_outcome != "unresolved"
+        or record.expected.resumable
+        or record.fixture.resume_request is None
+        or record.expected.hitl_rounds != 1
+        for record in unresolved
+    ):
+        raise ValueError(
+            "terminal_unresolved requires at least two completed/unresolved resumed HITL scenarios"
+        )
+    if any(
+        "terminal_unresolved" in record.tags
+        for record in records
+        if record.expected.execution_status == "waiting_user"
+    ):
+        raise ValueError("waiting_user scenarios cannot claim terminal_unresolved")
+    for strategy in ("direct_rewrite", "step_back", "hyde"):
+        cases = [
+            record
+            for record in records
+            if strategy in record.fixture.recovery_strategies
+        ]
+        success = any(record.expected.route == "answer" for record in cases)
+        bounded = any(
+            record.expected.route_sequence == ["recover", "no_knowledge"]
+            and record.expected.retrieval_attempt_max is not None
+            for record in cases
+        )
+        if not success or not bounded:
+            raise ValueError(
+                f"{strategy} requires one recovery success and one bounded no-ATT3 case"
+            )
+    cross_process = [record for record in records if "cross_process" in record.tags]
+    if not cross_process or any(
+        record.fixture.cross_process_reference is None
+        or "durable_cross_process_evidence" not in record.tags
+        or record.expected.execution_status != "waiting_user"
+        for record in cross_process
+    ):
+        raise ValueError(
+            "cross_process scenarios must reference durable external acceptance evidence"
+        )
+    computation_capabilities = {
+        record.capability
+        for record in records
+        if record.capability
+        in {"arithmetic", "statistical_computation", "sql", "other_unsupported"}
+        and record.expected.answer_outcome == "unsupported"
+    }
+    if computation_capabilities != {
+        "arithmetic",
+        "statistical_computation",
+        "sql",
+        "other_unsupported",
+    }:
+        raise ValueError("workflow scenarios must cover every unsupported computation capability")
 
 
 def scenario_coverage(records: list[WorkflowScenario]) -> dict[str, Any]:
@@ -284,20 +431,59 @@ def scenario_coverage(records: list[WorkflowScenario]) -> dict[str, Any]:
         "mode_counts": dict(Counter(record.mode for record in records)),
         "stage_counts": dict(Counter(record.stage for record in records)),
         "tag_counts": dict(sorted(Counter(tag for record in records for tag in record.tags).items())),
+        "semantic": {
+            "terminal_unresolved_completed": sum(
+                "terminal_unresolved" in record.tags
+                and record.expected.execution_status == "completed"
+                and record.expected.answer_outcome == "unresolved"
+                for record in records
+            ),
+            "bounded_recovery_by_strategy": {
+                strategy: sum(
+                    record.expected.route_sequence == ["recover", "no_knowledge"]
+                    and strategy in record.fixture.recovery_strategies
+                    for record in records
+                )
+                for strategy in ("direct_rewrite", "step_back", "hyde")
+            },
+            "durable_cross_process_references": sum(
+                record.fixture.cross_process_reference is not None for record in records
+            ),
+        },
     }
 
 
 def evaluate_baseline(
     *, dataset_path: Path = DEFAULT_DATASET, output_root: Path = DEFAULT_OUTPUT_ROOT,
     run_id: str | None = None, mode: Literal["all", "real", "contract"] = "all",
+    profile: EvaluationProfile | None = None,
     config: V2Config | None = None, retrieval_report: Path = DEFAULT_RETRIEVAL_REPORT,
     cross_process_report: Path | None = None,
+    planning_report: Path | None = None,
+    module4_gold_report: Path | None = None,
+    answer_ragas_report: Path | None = None,
+    stage_v21_report: Path | None = None,
+    stage_v22_report: Path | None = None,
+    stage_v23_report: Path | None = None,
 ) -> dict[str, Any]:
     config = config or V2Config.from_env()
     run_id = run_id or str(uuid4())
     report_dir = output_root / run_id
     if report_dir.exists():
         raise FileExistsError(f"refusing to overwrite baseline candidate: {report_dir}")
+    profile = profile or {
+        "contract": "development_contract",
+        "real": "development_real",
+        "all": "full_baseline",
+    }[mode]
+    expected_mode = {
+        "development_contract": "contract",
+        "development_real": "real",
+        "full_baseline": "all",
+    }[profile]
+    if mode != "all" and mode != expected_mode:
+        raise ValueError("mode and evaluation profile select different scenario sets")
+    mode = expected_mode
     records = load_workflow_scenarios(dataset_path)
     selected = [record for record in records if mode == "all" or record.mode == mode]
     raw_predictions = [_contract_prediction(record, config) if record.mode == "contract" else _real_prediction(record, config) for record in selected]
@@ -305,8 +491,49 @@ def evaluate_baseline(
     report_dir.mkdir(parents=True, exist_ok=False)
     predictions_path = report_dir / "predictions.jsonl"
     predictions_path.write_text("".join(json.dumps(item, ensure_ascii=False, sort_keys=True) + "\n" for item in predictions), encoding="utf-8")
-    stage_refs = _write_stage_reports(report_dir, run_id, predictions)
-    report = _build_report(run_id=run_id, dataset_path=dataset_path, config=config, records=records, selected=selected, predictions=predictions, predictions_path=predictions_path, stage_refs=stage_refs, retrieval_report=retrieval_report, cross_process_report=cross_process_report)
+    if profile == "full_baseline":
+        planning_report, module4_gold_report, answer_ragas_report = (
+            _run_integrated_evaluators(
+                report_dir=report_dir,
+                config=config,
+                planning_report=planning_report,
+                module4_gold_report=module4_gold_report,
+                answer_ragas_report=answer_ragas_report,
+            )
+        )
+    evaluated_commit = _git_commit()
+    stage_refs = [
+        _load_stage_report(stage_v21_report, "v2_1", config, evaluated_commit),
+        _load_stage_report(stage_v22_report, "v2_2", config, evaluated_commit),
+        _load_stage_report(stage_v23_report, "v2_3", config, evaluated_commit),
+    ]
+    evaluator_reports, evaluator_metrics = _load_evaluator_reports(
+        planning_report=planning_report,
+        module4_gold_report=module4_gold_report,
+        answer_ragas_report=answer_ragas_report,
+        config=config,
+        evaluated_commit=evaluated_commit,
+    )
+    evaluator_metrics["runtime"].update(
+        _load_stage_runtime_metrics(
+            [stage_v21_report, stage_v22_report, stage_v23_report]
+        )
+    )
+    report = _build_report(
+        run_id=run_id,
+        profile=profile,
+        dataset_path=dataset_path,
+        config=config,
+        records=records,
+        selected=selected,
+        predictions=predictions,
+        predictions_path=predictions_path,
+        stage_refs=stage_refs,
+        evaluator_reports=evaluator_reports,
+        evaluator_metrics=evaluator_metrics,
+        retrieval_report=retrieval_report,
+        cross_process_report=cross_process_report,
+    )
     report_path = report_dir / "report.json"
     report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     loaded = BaselineCandidateReport.model_validate_json(report_path.read_text(encoding="utf-8"))
@@ -315,13 +542,92 @@ def evaluate_baseline(
     return loaded.model_dump(mode="json")
 
 
+def _run_integrated_evaluators(
+    *,
+    report_dir: Path,
+    config: V2Config,
+    planning_report: Path | None,
+    module4_gold_report: Path | None,
+    answer_ragas_report: Path | None,
+) -> tuple[Path | None, Path | None, Path | None]:
+    """Run required evaluators when a full baseline did not provide artifacts."""
+
+    integrated = report_dir / "integrated_evaluators"
+    if planning_report is None:
+        from .planning import PlanningCoverageJudge, evaluate_planning
+
+        try:
+            payload = evaluate_planning(
+                QA_DATASET,
+                ANNOTATION_DATASET,
+                config=config,
+                judge=PlanningCoverageJudge(),
+            )
+            planning_report = integrated / "planning.json"
+            _write_integrated_report(
+                planning_report, payload, producer="module2_planning_evaluator"
+            )
+        except Exception:
+            planning_report = None
+    if module4_gold_report is None:
+        from .module4_gold import replay_module4_gold
+
+        try:
+            payload = replay_module4_gold(
+                MODULE4_GOLD_DATASET,
+                config=config,
+                output_root=integrated / "module4_runs",
+            )
+            module4_gold_report = integrated / "module4_gold.json"
+            _write_integrated_report(
+                module4_gold_report,
+                {**payload, "resolved_config": config.resolved_record()},
+                producer="module4_gold_replay_evaluator",
+            )
+        except Exception:
+            module4_gold_report = None
+    if answer_ragas_report is None:
+        from .answer_baseline import evaluate_v2_answers, write_answer_report
+
+        try:
+            payload = asyncio.run(
+                evaluate_v2_answers(
+                    qa_path=QA_DATASET,
+                    annotation_path=ANNOTATION_DATASET,
+                    config=config,
+                )
+            )
+            answer_ragas_report = integrated / "answer_ragas.json"
+            write_answer_report(payload, answer_ragas_report)
+        except Exception:
+            answer_ragas_report = None
+    return planning_report, module4_gold_report, answer_ragas_report
+
+
+def _write_integrated_report(
+    path: Path, payload: dict[str, Any], *, producer: str
+) -> None:
+    report = {
+        **payload,
+        "report_schema_version": 1,
+        "producer": producer,
+        "artifact_digest": "",
+    }
+    report["artifact_digest"] = _json_digest(report)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+
 def _contract_prediction(scenario: WorkflowScenario, config: V2Config) -> dict[str, Any]:
     started = time.perf_counter()
     try:
         harness = run_contract_scenario(scenario, config)
         prediction = _observe_result(scenario, harness.result, mode="contract", config=config, telemetry=harness.telemetry)
     except Exception as exc:
-        prediction = {"scenario_id": scenario.scenario_id, "mode": "contract", "stage": scenario.stage, "status": "technical_failure", "passed": False, "expected": scenario.expected.model_dump(mode="json"), "error": _safe_error(exc), "violations": [f"harness exception: {type(exc).__name__}"]}
+        prediction = {"scenario_id": scenario.scenario_id, "mode": "contract", "stage": scenario.stage, "expected_capability": scenario.capability, "status": "technical_failure", "passed": False, "expected": scenario.expected.model_dump(mode="json"), "error": _safe_error(exc), "violations": [f"harness exception: {type(exc).__name__}"]}
     prediction["elapsed_seconds"] = time.perf_counter() - started
     return prediction
 
@@ -343,7 +649,7 @@ def _real_prediction(scenario: WorkflowScenario, config: V2Config) -> dict[str, 
                     service.close()
         prediction = _observe_result(scenario, result, mode="real", config=config)
     except Exception as exc:
-        prediction = {"scenario_id": scenario.scenario_id, "mode": "real", "stage": scenario.stage, "status": "technical_failure", "passed": False, "expected": scenario.expected.model_dump(mode="json"), "error": _safe_error(exc), "violations": ["real service exception"]}
+        prediction = {"scenario_id": scenario.scenario_id, "mode": "real", "stage": scenario.stage, "expected_capability": scenario.capability, "status": "technical_failure", "passed": False, "expected": scenario.expected.model_dump(mode="json"), "error": _safe_error(exc), "violations": ["real service exception"]}
     prediction["elapsed_seconds"] = time.perf_counter() - started
     return prediction
 
@@ -358,7 +664,10 @@ def _observe_result(scenario: WorkflowScenario, result: Any, *, mode: str, confi
     observed, counts = _audit_tasks(tasks, evidence, stage, config=config, state=state)
     routes = [decision.route for task in tasks for decision in task.routing_decisions]
     strategies = [decision.recovery_strategy for task in tasks for decision in task.routing_decisions if decision.recovery_strategy]
-    violations = _compare_expected(scenario, stage, tasks, routes, strategies, counts)
+    hitl_rounds = state.get("hitl_rounds", 0) if state is not None else 0
+    violations = _compare_expected(
+        scenario, stage, tasks, routes, strategies, counts, hitl_rounds=hitl_rounds
+    )
     revisions = [revision for task in tasks for revision in task.query_revisions]
     attempts = [attempt for revision in revisions for attempt in revision.retrieval_attempts]
     pending_actions = [item.action for item in stage.pending_hitl_request.items] if stage.pending_hitl_request else []
@@ -367,7 +676,7 @@ def _observe_result(scenario: WorkflowScenario, result: Any, *, mode: str, confi
         "route_sequence": routes,
         "recovery_strategies": strategies,
         "task_count": len(tasks),
-        "capability": scenario.capability,
+        "task_capabilities": [task.capability for task in tasks],
         "finding_count": sum(task.grounded_finding is not None for task in tasks),
         "query_revision_count": len(revisions),
         "retrieval_attempt_count": len(attempts),
@@ -375,13 +684,26 @@ def _observe_result(scenario: WorkflowScenario, result: Any, *, mode: str, confi
         "grade_record_count": sum(len(task.grade_records) for task in tasks),
         "grade_input_attempt_ids": [attempt_id for task in tasks for record in task.grade_records for attempt_id in record.input_attempt_ids],
         "routing_decision_count": sum(len(task.routing_decisions) for task in tasks),
-        "hitl_action": pending_actions[0] if pending_actions else None,
+        "hitl_action": pending_actions[0] if pending_actions else next(
+            (route for route in reversed(routes) if route in {"clarify", "scope_select"}),
+            None,
+        ),
+        "hitl_rounds": hitl_rounds,
         "telemetry": _telemetry(telemetry),
     })
-    return {"scenario_id": scenario.scenario_id, "mode": mode, "stage": scenario.stage, "status": "technical_failure" if stage.execution_status == "failed" else stage.execution_status, "passed": not violations, "expected": scenario.expected.model_dump(mode="json"), "observed": observed, "violations": violations, "error": stage.error.model_dump(mode="json") if stage.error else None}
+    return {"scenario_id": scenario.scenario_id, "mode": mode, "stage": scenario.stage, "expected_capability": scenario.capability, "status": "technical_failure" if stage.execution_status == "failed" else stage.execution_status, "passed": not violations, "expected": scenario.expected.model_dump(mode="json"), "observed": observed, "violations": violations, "error": stage.error.model_dump(mode="json") if stage.error else None}
 
 
-def _compare_expected(scenario: WorkflowScenario, stage: Any, tasks: list[Any], routes: list[str], strategies: list[str], counts: InvariantCounts) -> list[str]:
+def _compare_expected(
+    scenario: WorkflowScenario,
+    stage: Any,
+    tasks: list[Any],
+    routes: list[str],
+    strategies: list[str],
+    counts: InvariantCounts,
+    *,
+    hitl_rounds: int,
+) -> list[str]:
     expected = scenario.expected
     violations: list[str] = []
     if stage.execution_status != expected.execution_status:
@@ -418,8 +740,14 @@ def _compare_expected(scenario: WorkflowScenario, stage: Any, tasks: list[Any], 
         violations.append("retrieval_attempt_max violated")
     if expected.hitl_action is not None and expected.hitl_action not in {
         item.action for item in (stage.pending_hitl_request.items if stage.pending_hitl_request else [])
-    }:
+    } and expected.hitl_action not in routes:
         violations.append("hitl_action mismatch")
+    if expected.hitl_rounds is not None and hitl_rounds != expected.hitl_rounds:
+        violations.append("hitl_rounds mismatch")
+    if expected.hitl_rounds_min is not None and hitl_rounds < expected.hitl_rounds_min:
+        violations.append("hitl_rounds_min violated")
+    if expected.hitl_rounds_max is not None and hitl_rounds > expected.hitl_rounds_max:
+        violations.append("hitl_rounds_max violated")
     if expected.citation_valid is True and counts.citation_violation_count:
         violations.append("citation validity mismatch")
     if expected.provenance_valid is True and counts.provenance_violation_count:
@@ -433,14 +761,26 @@ def _audit_tasks(tasks: list[Any], evidence: dict[str, Any], stage: Any, *, conf
     schema = provenance = citation = budget = degraded = 0
     finding_ids: set[str] = set()
     evidence_ids = set(evidence)
+    if len(tasks) > config.budgets.max_subqueries:
+        budget += 1
     for task in tasks:
-        if len(tasks) > config.budgets.max_subqueries:
-            budget += 1
         if task.execution_status == "failed" and task.answer_outcome is not None:
             schema += 1
-        if len(task.query_revisions) > 2 or any(len(revision.retrieval_attempts) > 2 for revision in task.query_revisions):
+        if len(task.query_revisions) > config.budgets.max_query_revisions or any(
+            len(revision.retrieval_attempts)
+            > config.budgets.max_retrieval_attempts_per_revision
+            for revision in task.query_revisions
+        ):
             budget += 1
-        if len(task.query_revisions) > 2 or any(attempt.ordinal >= 3 for revision in task.query_revisions for attempt in revision.retrieval_attempts):
+        if any(
+            revision.ordinal > config.budgets.max_query_revisions
+            or any(
+                attempt.ordinal
+                > config.budgets.max_retrieval_attempts_per_revision
+                for attempt in revision.retrieval_attempts
+            )
+            for revision in task.query_revisions
+        ):
             budget += 1
         for revision in task.query_revisions:
             degraded += sum(int(attempt.retrieval_degraded) for attempt in revision.retrieval_attempts)
@@ -450,7 +790,34 @@ def _audit_tasks(tasks: list[Any], evidence: dict[str, Any], stage: Any, *, conf
             support = set(task.grade_records[-1].grade.supporting_evidence_ids) if task.grade_records else set()
             latest_revision = task.query_revisions[-1].id if task.query_revisions else None
             latest_grade_revision = task.grade_records[-1].query_revision_id if task.grade_records else None
-            if finding.task_id != task.id or not finding.evidence_ids or len(finding.evidence_ids) > config.budgets.max_evidence_per_finding or not set(finding.evidence_ids) <= evidence_ids or not set(finding.evidence_ids) <= support or latest_revision != latest_grade_revision:
+            latest_grade = task.grade_records[-1] if task.grade_records else None
+            current_attempt_ids = {
+                attempt.id
+                for attempt in (task.query_revisions[-1].retrieval_attempts if task.query_revisions else [])
+            }
+            attempt_evidence = {
+                attempt.id: set(attempt.evidence_ids)
+                for attempt in (task.query_revisions[-1].retrieval_attempts if task.query_revisions else [])
+            }
+            grade_input_valid = bool(
+                latest_grade
+                and set(latest_grade.input_attempt_ids) <= current_attempt_ids
+                and set(finding.evidence_ids) <= set(latest_grade.input_evidence_ids)
+            )
+            occurrence_valid = all(
+                any(
+                    occurrence.task_id == task.id
+                    and occurrence.query_revision_id == latest_revision
+                    and occurrence.retrieval_attempt_id in current_attempt_ids
+                    and evidence_id
+                    in attempt_evidence.get(occurrence.retrieval_attempt_id, set())
+                    for occurrence in evidence[evidence_id].occurrences
+                )
+                and evidence[evidence_id].evidence_id == evidence[evidence_id].chunk_id
+                for evidence_id in finding.evidence_ids
+                if evidence_id in evidence
+            )
+            if finding.task_id != task.id or not finding.evidence_ids or len(finding.evidence_ids) > config.budgets.max_evidence_per_finding or not set(finding.evidence_ids) <= evidence_ids or not set(finding.evidence_ids) <= support or latest_revision != latest_grade_revision or not grade_input_valid or not occurrence_valid:
                 provenance += 1
     if state is not None and state.get("hitl_rounds", 0) > config.budgets.max_hitl_rounds:
         budget += 1
@@ -463,7 +830,22 @@ def _audit_tasks(tasks: list[Any], evidence: dict[str, Any], stage: Any, *, conf
     return {"execution_status": stage.execution_status, "answer_outcome": stage.answer_outcome, "route": next((task.routing_decisions[-1].route for task in reversed(tasks) if task.routing_decisions), None), "route_counts": dict(Counter(decision.route for task in tasks for decision in task.routing_decisions)), "technical_failure_count": sum(task.execution_status == "failed" for task in tasks) + int(stage.execution_status == "failed" and not any(task.execution_status == "failed" for task in tasks)), "degraded_retrieval_count": degraded, "schema_invariant_violation_count": schema, "provenance_violation_count": provenance, "citation_violation_count": citation, "budget_violation_count": budget}, InvariantCounts(schema_invariant_violation_count=schema, provenance_violation_count=provenance, citation_violation_count=citation, budget_violation_count=budget, retrieval_degraded_queries_count=degraded)
 
 
-def _build_report(*, run_id: str, dataset_path: Path, config: V2Config, records: list[WorkflowScenario], selected: list[WorkflowScenario], predictions: list[dict[str, Any]], predictions_path: Path, stage_refs: list[StageReportReference], retrieval_report: Path, cross_process_report: Path | None) -> dict[str, Any]:
+def _build_report(
+    *,
+    run_id: str,
+    profile: EvaluationProfile,
+    dataset_path: Path,
+    config: V2Config,
+    records: list[WorkflowScenario],
+    selected: list[WorkflowScenario],
+    predictions: list[dict[str, Any]],
+    predictions_path: Path,
+    stage_refs: list[StageReportReference],
+    evaluator_reports: list[EvaluatorReportReference],
+    evaluator_metrics: dict[str, Any],
+    retrieval_report: Path,
+    cross_process_report: Path | None,
+) -> dict[str, Any]:
     dataset_records = _all_dataset_records(dataset_path)
     counts = InvariantCounts(
         schema_invariant_violation_count=sum(item.get("observed", {}).get("schema_invariant_violation_count", 0) for item in predictions),
@@ -473,41 +855,157 @@ def _build_report(*, run_id: str, dataset_path: Path, config: V2Config, records:
         retrieval_degraded_queries_count=sum(item.get("observed", {}).get("degraded_retrieval_count", 0) for item in predictions),
     )
     v1 = _check_retrieval_gate(retrieval_report)
-    cross = _check_cross_process_gate(cross_process_report)
+    current_commit = _git_commit()
+    cross = _check_cross_process_gate(
+        cross_process_report, current_git_commit=current_commit
+    )
+    if cross["passed"]:
+        stage_refs = [
+            (
+                StageReportReference(
+                    target_stage="v2_3",
+                    run_id=cross.get("run_id"),
+                    path=cross.get("path"),
+                    digest=cross.get("sha256"),
+                    available=True,
+                    evaluation_complete=True,
+                )
+                if item.target_stage == "v2_3" and not item.evaluation_complete
+                else item
+            )
+            for item in stage_refs
+        ]
     dataset_gate = all(record.available for record in dataset_records)
-    gate_values = {
-        "dataset_schema_and_coverage": dataset_gate,
-        "v1_2_retrieval_regression": v1["passed"],
-        "schema_invariant_zero": counts.schema_invariant_violation_count == 0,
-        "provenance_violation_zero": counts.provenance_violation_count == 0,
-        "citation_violation_zero": counts.citation_violation_count == 0,
-        "budget_violation_zero": counts.budget_violation_count == 0,
-        "retrieval_degraded_queries_zero": counts.retrieval_degraded_queries_count == 0,
-        "computation_capability_safety": _computation_gate(predictions),
-        "baseline_scenarios_terminal_contract": all(item.get("passed") is True for item in predictions),
-        "v2_3_cross_process": cross["passed"],
-        "ordinary_baseline_zero_unexpected_technical_failures": not any(item.get("status") == "technical_failure" for item in predictions if item.get("mode") == "real"),
+    integrity = _check_frozen_dataset_integrity(dataset_records)
+    contract_ids = {record.scenario_id for record in records if record.mode == "contract"}
+    real_ids = {record.scenario_id for record in records if record.mode == "real"}
+    selected_ids = {record.scenario_id for record in selected}
+    workflow_evaluated = contract_ids <= selected_ids
+    real_evaluated = real_ids <= selected_ids and bool(real_ids)
+    evaluator_by_name = {item.evaluator: item for item in evaluator_reports}
+    stage_evaluated = all(item.evaluation_complete for item in stage_refs)
+    component_values = {
+        "retrieval_regression": bool(v1["evaluated"]),
+        "planning_evaluator": evaluator_by_name["planning"].evaluation_complete,
+        "module4_grade_route_evaluator": evaluator_by_name[
+            "module4_grade_route"
+        ].evaluation_complete,
+        "answer_ragas_evaluator": evaluator_by_name[
+            "answer_ragas"
+        ].evaluation_complete,
+        "workflow_contract_scenarios": workflow_evaluated,
+        "required_real_model_scenarios": real_evaluated,
+        "v2_3_cross_process_acceptance": bool(cross["evaluated"]),
+        "required_datasets_integrity": integrity["passed"],
+        "stage_reports": stage_evaluated,
     }
-    incomplete_reasons = []
-    if not all(ref.available for ref in stage_refs):
-        incomplete_reasons.append("required stage report missing")
-    if not cross["evaluated"]:
-        incomplete_reasons.append("cross-process evidence missing")
-    if not dataset_gate:
-        incomplete_reasons.append("required dataset missing")
-    evaluation_incomplete = bool(incomplete_reasons)
+    missing_components = [name for name, value in component_values.items() if not value]
+    if profile != "full_baseline":
+        missing_components.insert(0, f"profile {profile} is development-only")
+    completeness = EvaluationCompleteness(
+        profile=profile,
+        retrieval_regression_evaluated=component_values["retrieval_regression"],
+        planning_evaluator_evaluated=component_values["planning_evaluator"],
+        module4_grade_route_evaluator_evaluated=component_values[
+            "module4_grade_route_evaluator"
+        ],
+        answer_ragas_evaluator_evaluated=component_values["answer_ragas_evaluator"],
+        workflow_contract_scenarios_evaluated=component_values[
+            "workflow_contract_scenarios"
+        ],
+        required_real_model_scenarios_evaluated=component_values[
+            "required_real_model_scenarios"
+        ],
+        v2_3_cross_process_acceptance_evaluated=component_values[
+            "v2_3_cross_process_acceptance"
+        ],
+        required_datasets_integrity_validated=component_values[
+            "required_datasets_integrity"
+        ],
+        stage_reports_evaluated=component_values["stage_reports"],
+        complete=profile == "full_baseline" and not missing_components,
+        missing_components=missing_components,
+    )
+    computation_evaluated = {
+        "arithmetic", "statistical_computation", "sql", "other_unsupported"
+    } <= {
+        item.get("expected_capability")
+        for item in predictions
+    }
+    gate_checks: dict[str, tuple[bool, bool]] = {
+        "dataset_schema_and_coverage": (dataset_gate, True),
+        "frozen_dataset_integrity": (integrity["passed"], True),
+        "v1_2_retrieval_regression": (v1["passed"], v1["evaluated"]),
+        "schema_invariant_zero": (
+            counts.schema_invariant_violation_count == 0,
+            workflow_evaluated,
+        ),
+        "provenance_violation_zero": (
+            counts.provenance_violation_count == 0,
+            workflow_evaluated,
+        ),
+        "citation_violation_zero": (
+            counts.citation_violation_count == 0,
+            workflow_evaluated,
+        ),
+        "budget_violation_zero": (
+            counts.budget_violation_count == 0,
+            workflow_evaluated,
+        ),
+        "retrieval_degraded_queries_zero": (
+            counts.retrieval_degraded_queries_count == 0,
+            workflow_evaluated,
+        ),
+        "computation_capability_safety": (
+            _computation_gate(predictions),
+            computation_evaluated,
+        ),
+        "baseline_scenarios_terminal_contract": (
+            workflow_evaluated
+            and all(
+                item.get("passed") is True
+                for item in predictions
+                if item.get("mode") == "contract"
+            ),
+            workflow_evaluated,
+        ),
+        "v2_3_cross_process": (cross["passed"], cross["evaluated"]),
+        "ordinary_baseline_zero_unexpected_technical_failures": (
+            real_evaluated
+            and not any(
+                item.get("status") == "technical_failure"
+                for item in predictions
+                if item.get("mode") == "real"
+            ),
+            real_evaluated,
+        ),
+    }
+    gate_values = {
+        name: bool(value and evaluated)
+        for name, (value, evaluated) in gate_checks.items()
+    }
+    evaluation_incomplete = not completeness.complete
+    incomplete_reasons = completeness.missing_components
     dirty = _git_dirty()
     failed_gates = [name for name, passed in gate_values.items() if not passed]
     if dirty is not False:
         failed_gates.append("git_dirty")
     if incomplete_reasons:
         failed_gates.append("evaluation_incomplete")
-    freeze_eligible = not evaluation_incomplete and dirty is False and all(gate_values.values())
+    freeze_eligible = (
+        profile == "full_baseline"
+        and not evaluation_incomplete
+        and dirty is False
+        and all(gate_values.values())
+    )
     report = BaselineCandidateReport(
-        run_id=run_id, timestamp=datetime.now(timezone.utc).isoformat(), git_commit=_git_commit(), git_dirty=dirty,
-        target="v2_final_baseline_candidate", dataset_records=dataset_records, stage_reports=stage_refs,
-        resolved_config=config.resolved_record(), metrics=_metrics(selected, predictions, config), invariant_counts=counts,
-        hard_gate_results=[HardGateResult(name=name, passed=passed, evaluated=True, reason=_gate_reason(name, passed, v1, cross)) for name, passed in gate_values.items()],
+        run_id=run_id, timestamp=datetime.now(timezone.utc).isoformat(), git_commit=current_commit, git_dirty=dirty,
+        target="v2_final_baseline_candidate", evaluation_profile=profile,
+        evaluation_completeness=completeness, dataset_records=dataset_records,
+        stage_reports=stage_refs, evaluator_reports=evaluator_reports,
+        resolved_config=config.resolved_record(),
+        metrics=_metrics(selected, predictions, config, evaluator_metrics), invariant_counts=counts,
+        hard_gate_results=[HardGateResult(name=name, passed=gate_values[name], evaluated=evaluated, reason=_gate_reason(name, gate_values[name], v1, cross)) for name, (_value, evaluated) in gate_checks.items()],
         hard_gates=gate_values, failed_gates=failed_gates, baseline_status="eligible" if freeze_eligible else "not_eligible", freeze_eligible=freeze_eligible, evaluation_incomplete=evaluation_incomplete, incompleteness_reasons=incomplete_reasons,
         predictions_sha256=_sha256(predictions_path), errors=[item["error"] for item in predictions if item.get("error")],
         digests={"dataset_sha256": _sha256(dataset_path), "workflow_scenarios_sha256": _sha256(dataset_path), "resolved_config_sha256": _json_digest(config.resolved_record()), "predictions_sha256": _sha256(predictions_path), "retrieval_eval_v2_sha256": _digest_if_exists(RETRIEVAL_DATASET), "qa_sha256": _digest_if_exists(QA_DATASET), "v2_qa_annotations_sha256": _digest_if_exists(ANNOTATION_DATASET), "module4_gold_sha256": _digest_if_exists(MODULE4_GOLD_DATASET), "artifact_manifest_sha256": _json_digest({"dataset_sha256": _sha256(dataset_path), "resolved_config_sha256": _json_digest(config.resolved_record()), "predictions_sha256": _sha256(predictions_path)})},
@@ -515,33 +1013,449 @@ def _build_report(*, run_id: str, dataset_path: Path, config: V2Config, records:
     return report.model_copy(update={"artifact_digest": _report_digest(report)}).model_dump(mode="json")
 
 
-def _metrics(selected: list[WorkflowScenario], predictions: list[dict[str, Any]], config: V2Config) -> dict[str, Any]:
+def _metrics(
+    selected: list[WorkflowScenario],
+    predictions: list[dict[str, Any]],
+    config: V2Config,
+    evaluator_metrics: dict[str, Any],
+) -> dict[str, Any]:
     routes = Counter(item.get("observed", {}).get("route") for item in predictions if item.get("observed", {}).get("route"))
-    computation = [item for item in predictions if "unsupported" in item.get("scenario_id", "")]
+    recovery = [
+        item for item in predictions if "recover" in item.get("observed", {}).get("route_sequence", [])
+    ]
+    telemetry = [item.get("observed", {}).get("telemetry") for item in predictions]
+    telemetry = [item for item in telemetry if item is not None]
+    retrieval_attempts = [
+        int(item.get("observed", {}).get("retrieval_attempt_count", 0))
+        for item in predictions
+    ]
     return {
         "scenario_count": len(selected), "real_scenario_count": sum(item["mode"] == "real" for item in predictions), "contract_scenario_count": sum(item["mode"] == "contract" for item in predictions), "scenario_pass_count": sum(item.get("passed") is True for item in predictions), "scenario_failure_count": sum(item.get("passed") is not True for item in predictions), "route_counts": dict(routes),
         "technical_failure_count": sum(item.get("status") == "technical_failure" for item in predictions if item.get("mode") == "real"),
         "contract_technical_failure_count": sum(item.get("status") == "technical_failure" for item in predictions if item.get("mode") == "contract"),
-        "planning": {"complexity_accuracy": None, "capability_accuracy": None, "decomposition_requirement_coverage": None, "structural_violation_counts": None},
-        "evidence_route": {name: None for name in ("relevance_accuracy", "answerability_accuracy", "ambiguity_accuracy", "recoverability_accuracy", "failure_reason_accuracy", "grade_exact_match", "route_accuracy", "recovery_strategy_accuracy", "recovery_success_rate")},
-        "answer": {"supported_subset_ragas": None, "outcome_accuracy": None, "unsupported_computation_recall": (sum(item.get("observed", {}).get("answer_outcome") == "unsupported" for item in computation) / len(computation)) if computation else None, "abstention_correctness": None, "citation_violations": sum(item.get("observed", {}).get("citation_violation_count", 0) for item in predictions), "provenance_violations": sum(item.get("observed", {}).get("provenance_violation_count", 0) for item in predictions)},
-        "runtime": {"active_runtime_seconds": sum(float(item.get("elapsed_seconds", 0)) for item in predictions), "hitl_waiting_seconds": None, "retrieval_latency_seconds": None, "role_calls": None, "role_retries": None, "tokens": None, "attempts": None, "checkpoint_resume_latency_seconds": None},
+        "planning": evaluator_metrics["planning"],
+        "evidence_route": {
+            **evaluator_metrics["evidence_route"],
+            "recovery_success_rate": (
+                sum(item.get("observed", {}).get("route") == "answer" for item in recovery)
+                / len(recovery)
+                if recovery
+                else None
+            ),
+            "retrieval_attempt_metrics": {
+                "total": sum(retrieval_attempts),
+                "mean_per_scenario": (
+                    sum(retrieval_attempts) / len(retrieval_attempts)
+                    if retrieval_attempts
+                    else None
+                ),
+                "max_per_scenario": max(retrieval_attempts) if retrieval_attempts else None,
+            },
+        },
+        "answer": {
+            "supported_subset_ragas": evaluator_metrics["answer"]["supported_subset_ragas"],
+            "outcome_accuracy": evaluator_metrics["answer"].get("outcome_accuracy"),
+            "unsupported_computation_recall": evaluator_metrics["answer"].get(
+                "unsupported_computation_recall"
+            ),
+            "abstention_correctness": evaluator_metrics["answer"].get(
+                "abstention_correctness"
+            ),
+            "citation_violations": sum(item.get("observed", {}).get("citation_violation_count", 0) for item in predictions),
+            "provenance_violations": sum(item.get("observed", {}).get("provenance_violation_count", 0) for item in predictions),
+        },
+        "runtime": {
+            "active_runtime_seconds": sum(float(item.get("elapsed_seconds", 0)) for item in predictions),
+            "hitl_waiting_seconds": evaluator_metrics["runtime"].get("hitl_waiting_seconds"),
+            "retrieval_latency_seconds": evaluator_metrics["runtime"].get("retrieval_latency_seconds"),
+            "role_calls": {
+                key: sum(int(item.get(key, 0)) for item in telemetry)
+                for key in ("retrieval_calls", "grader_calls", "finding_calls", "synthesis_calls", "hitl_calls")
+            } if telemetry else None,
+            "role_retries": evaluator_metrics["runtime"].get("role_retries"),
+            "tokens": evaluator_metrics["runtime"].get("tokens"),
+            "attempts": sum(retrieval_attempts) if retrieval_attempts else None,
+            "checkpoint_resume_latency_seconds": evaluator_metrics["runtime"].get("checkpoint_resume_latency_seconds"),
+        },
         "budget_limits": config.budgets.model_dump(mode="json"), "route_counts": dict(routes),
     }
 
 
 def _computation_gate(predictions: list[dict[str, Any]]) -> bool:
-    cases = [item for item in predictions if "unsupported" in item.get("scenario_id", "") or item.get("observed", {}).get("capability") in {"arithmetic", "statistical_computation", "sql", "other_unsupported"}]
-    return bool(cases) and all(item.get("observed", {}).get("answer_outcome") == "unsupported" for item in cases)
+    unsupported_capabilities = {
+        "arithmetic", "statistical_computation", "sql", "other_unsupported"
+    }
+    cases = [
+        item
+        for item in predictions
+        if item.get("expected_capability") in unsupported_capabilities
+    ]
+    return bool(cases) and all(
+        item.get("observed", {}).get("answer_outcome") == "unsupported"
+        and bool(item.get("observed", {}).get("task_capabilities"))
+        and set(item["observed"]["task_capabilities"])
+        == {item["expected_capability"]}
+        for item in cases
+    )
 
 
-def _write_stage_reports(report_dir: Path, run_id: str, predictions: list[dict[str, Any]]) -> list[StageReportReference]:
-    refs = []
-    for stage in ("v2_1", "v2_2", "v2_3"):
-        path = report_dir / f"stage_{stage}.json"
-        path.write_text(json.dumps({"run_id": run_id, "target_stage": stage, "predictions": [item for item in predictions if item.get("stage") == stage]}, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-        refs.append(StageReportReference(target_stage=stage, run_id=run_id, path=str(path), digest=_sha256(path)))
-    return refs
+def _load_stage_report(
+    path: Path | None,
+    target_stage: TargetStage,
+    config: V2Config,
+    evaluated_commit: str | None,
+) -> StageReportReference:
+    if path is None or not path.is_file():
+        return StageReportReference(
+            target_stage=target_stage,
+            path=str(path) if path is not None else None,
+            error="stage evaluator artifact not provided",
+        )
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        envelope = ExternalReportEnvelope.model_validate(payload)
+        _validate_external_report(
+            payload,
+            envelope,
+            expected_producer=f"v2_{target_stage.removeprefix('v2_')}_stage_evaluator",
+            config=config,
+            evaluated_commit=evaluated_commit,
+        )
+        metrics = payload.get("metrics")
+        if not isinstance(metrics, dict):
+            raise ValueError("stage report metrics must be an object")
+        declared_stage = payload.get("target_stage")
+        if target_stage == "v2_1":
+            stage_ok = declared_stage == "v2_1" and {
+                "retrieval_completed_count",
+                "grader_completed_count",
+            } <= set(metrics)
+            complete = (
+                metrics.get("technical_failure_count") == 0
+                and metrics.get("degraded_retrieval_count") == 0
+                and metrics.get("invariant_violation_count") == 0
+            )
+        elif target_stage == "v2_2":
+            stage_ok = declared_stage == "v2_2" and {
+                "recovery_count",
+                "finding_count",
+            } <= set(metrics)
+            complete = (
+                metrics.get("technical_failure_count") == 0
+                and metrics.get("invariant_violation_count") == 0
+            )
+        else:
+            stage_ok = declared_stage == "v2_3" and {
+                "interrupt_count",
+                "resume_count",
+                "final_execution_status",
+            } <= set(metrics)
+            complete = (
+                int(metrics.get("interrupt_count", 0)) >= 1
+                and int(metrics.get("resume_count", 0)) >= 1
+                and metrics.get("final_execution_status") == "completed"
+                and metrics.get("invariant_violation_count") == 0
+            )
+        if not stage_ok:
+            raise ValueError(f"artifact is not a real {target_stage} stage evaluator report")
+        return StageReportReference(
+            target_stage=target_stage,
+            run_id=envelope.run_id,
+            path=str(path),
+            digest=_sha256(path),
+            available=True,
+            evaluation_complete=bool(complete),
+            error=None if complete else "stage evaluator reports incomplete execution",
+        )
+    except Exception as exc:
+        return StageReportReference(
+            target_stage=target_stage,
+            path=str(path),
+            error=_safe_error(exc)["message"],
+        )
+
+
+def _load_evaluator_reports(
+    *,
+    planning_report: Path | None,
+    module4_gold_report: Path | None,
+    answer_ragas_report: Path | None,
+    config: V2Config,
+    evaluated_commit: str | None,
+) -> tuple[list[EvaluatorReportReference], dict[str, Any]]:
+    planning_ref, planning_metrics = _load_planning_report(
+        planning_report, config, evaluated_commit
+    )
+    module4_ref, module4_metrics = _load_module4_report(
+        module4_gold_report, config, evaluated_commit
+    )
+    answer_ref, answer_metrics = _load_answer_report(
+        answer_ragas_report, config, evaluated_commit
+    )
+    return (
+        [planning_ref, module4_ref, answer_ref],
+        {
+            "planning": planning_metrics,
+            "evidence_route": module4_metrics,
+            "answer": answer_metrics,
+            "runtime": {
+                "hitl_waiting_seconds": None,
+                "retrieval_latency_seconds": None,
+                "role_retries": None,
+                "tokens": None,
+                "checkpoint_resume_latency_seconds": None,
+            },
+        },
+    )
+
+
+def _load_stage_runtime_metrics(paths: list[Path | None]) -> dict[str, Any]:
+    metrics_by_stage: list[dict[str, Any]] = []
+    for path in paths:
+        if path is None or not path.is_file():
+            continue
+        try:
+            metrics = json.loads(path.read_text(encoding="utf-8")).get("metrics", {})
+        except (OSError, json.JSONDecodeError):
+            continue
+        if isinstance(metrics, dict):
+            metrics_by_stage.append(metrics)
+
+    def first_value(*names: str) -> Any:
+        return next(
+            (
+                metrics[name]
+                for metrics in metrics_by_stage
+                for name in names
+                if metrics.get(name) is not None
+            ),
+            None,
+        )
+
+    checkpoint = {
+        name: first_value(name)
+        for name in (
+            "checkpoint_load_latency_seconds",
+            "checkpoint_write_latency_seconds",
+            "resume_latency_seconds",
+        )
+    }
+    return {
+        "hitl_waiting_seconds": first_value("hitl_waiting_seconds"),
+        "retrieval_latency_seconds": first_value(
+            "retrieval_latency_seconds", "retrieval_total_latency_seconds"
+        ),
+        "role_retries": first_value("role_retries"),
+        "tokens": first_value("tokens", "role_tokens"),
+        "checkpoint_resume_latency_seconds": (
+            checkpoint if any(value is not None for value in checkpoint.values()) else None
+        ),
+    }
+
+
+def _missing_evaluator(
+    name: Literal["planning", "module4_grade_route", "answer_ragas"],
+    path: Path | None,
+    error: str,
+) -> EvaluatorReportReference:
+    return EvaluatorReportReference(
+        evaluator=name,
+        path=str(path) if path is not None else None,
+        error=error,
+    )
+
+
+def _validate_external_report(
+    payload: dict[str, Any],
+    envelope: ExternalReportEnvelope,
+    *,
+    expected_producer: str,
+    config: V2Config,
+    evaluated_commit: str | None,
+) -> None:
+    if envelope.producer != expected_producer:
+        raise ValueError(f"unexpected report producer: {envelope.producer}")
+    if evaluated_commit is None or envelope.git_commit != evaluated_commit:
+        raise ValueError("report git_commit does not match evaluated commit")
+    if envelope.git_dirty:
+        raise ValueError("dirty evaluator artifact cannot support a full baseline")
+    if envelope.resolved_config != config.resolved_record():
+        raise ValueError("report resolved_config does not match baseline config")
+    if envelope.artifact_digest != _json_digest(
+        {**payload, "artifact_digest": ""}
+    ):
+        raise ValueError("report artifact_digest mismatch")
+
+
+def _load_planning_report(
+    path: Path | None,
+    config: V2Config,
+    evaluated_commit: str | None,
+) -> tuple[EvaluatorReportReference, dict[str, Any]]:
+    empty = {
+        "complexity_accuracy": None,
+        "capability_accuracy": None,
+        "decomposition_requirement_coverage": None,
+        "structural_violation_counts": None,
+    }
+    if path is None or not path.is_file():
+        return _missing_evaluator("planning", path, "planning report not provided"), empty
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        envelope = ExternalReportEnvelope.model_validate(payload)
+        _validate_external_report(
+            payload,
+            envelope,
+            expected_producer="module2_planning_evaluator",
+            config=config,
+            evaluated_commit=evaluated_commit,
+        )
+        dataset = payload["dataset"]
+        metrics = payload["metrics"]
+        structural = payload["structural_violations"]
+        simple_correct = int(metrics["simple_capability_correct"])
+        simple_total = int(metrics["simple_capability_total"])
+        complex_correct = int(metrics["complex_task_capability_correct"])
+        complex_total = int(metrics["complex_task_capability_total"])
+        capability_total = simple_total + complex_total
+        values = {
+            "complexity_accuracy": metrics.get("complexity_accuracy"),
+            "capability_accuracy": (
+                (simple_correct + complex_correct) / capability_total
+                if capability_total
+                else None
+            ),
+            "decomposition_requirement_coverage": metrics.get(
+                "micro_pipeline_requirement_coverage"
+            ),
+            "structural_violation_counts": structural,
+        }
+        complete = (
+            payload.get("evaluation_incomplete") is False
+            and dataset.get("qa_sha256") == _digest_if_exists(QA_DATASET)
+            and dataset.get("annotation_sha256") == FROZEN_ANNOTATION_DATASET_SHA256
+            and all(values[key] is not None for key in values if key != "structural_violation_counts")
+        )
+        return EvaluatorReportReference(
+            evaluator="planning",
+            run_id=envelope.run_id,
+            path=str(path),
+            digest=_sha256(path),
+            available=True,
+            evaluation_complete=complete,
+            error=None if complete else "planning evaluation incomplete or dataset identity mismatch",
+        ), values
+    except Exception as exc:
+        return _missing_evaluator("planning", path, _safe_error(exc)["message"]), empty
+
+
+def _load_module4_report(
+    path: Path | None,
+    config: V2Config,
+    evaluated_commit: str | None,
+) -> tuple[EvaluatorReportReference, dict[str, Any]]:
+    fields = (
+        "relevance_accuracy",
+        "answerability_accuracy",
+        "ambiguity_accuracy",
+        "recoverability_accuracy",
+        "failure_reason_accuracy",
+        "grade_exact_match_accuracy",
+        "route_accuracy",
+        "recovery_strategy_accuracy",
+    )
+    empty = {field: None for field in fields}
+    if path is None or not path.is_file():
+        return _missing_evaluator(
+            "module4_grade_route", path, "Module 4 Gold report not provided"
+        ), empty
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        envelope = ExternalReportEnvelope.model_validate(payload)
+        _validate_external_report(
+            payload,
+            envelope,
+            expected_producer="module4_gold_replay_evaluator",
+            config=config,
+            evaluated_commit=evaluated_commit,
+        )
+        metrics = payload["metrics"]
+        values = {field: metrics.get(field) for field in fields}
+        complete = (
+            payload.get("dataset", {}).get("sha256") == FROZEN_MODULE4_GOLD_SHA256
+            and payload.get("evaluation_incomplete") is False
+            and all(value is not None for value in values.values())
+        )
+        return EvaluatorReportReference(
+            evaluator="module4_grade_route",
+            run_id=envelope.run_id,
+            path=str(path),
+            digest=_sha256(path),
+            available=True,
+            evaluation_complete=complete,
+            error=None if complete else "Module 4 Gold evaluation incomplete or dataset identity mismatch",
+        ), values
+    except Exception as exc:
+        return _missing_evaluator(
+            "module4_grade_route", path, _safe_error(exc)["message"]
+        ), empty
+
+
+def _load_answer_report(
+    path: Path | None,
+    config: V2Config,
+    evaluated_commit: str | None,
+) -> tuple[EvaluatorReportReference, dict[str, Any]]:
+    empty = {
+        "supported_subset_ragas": None,
+        "outcome_accuracy": None,
+        "unsupported_computation_recall": None,
+        "abstention_correctness": None,
+    }
+    if path is None or not path.is_file():
+        return _missing_evaluator("answer_ragas", path, "answer RAGAS report not provided"), empty
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        envelope = ExternalReportEnvelope.model_validate(payload)
+        _validate_external_report(
+            payload,
+            envelope,
+            expected_producer="v2_answer_ragas_evaluator",
+            config=config,
+            evaluated_commit=evaluated_commit,
+        )
+        dataset = payload["dataset"]
+        metrics = payload["metrics"]
+        ragas = metrics.get("supported_subset_ragas")
+        complete = (
+            dataset.get("qa_sha256") == _digest_if_exists(QA_DATASET)
+            and dataset.get("annotation_sha256") == FROZEN_ANNOTATION_DATASET_SHA256
+            and payload.get("evaluation_incomplete") is False
+            and isinstance(ragas, dict)
+            and bool(ragas)
+            and all(value is not None for value in ragas.values())
+            and metrics.get("outcome_accuracy") is not None
+            and metrics.get("unsupported_computation_recall") is not None
+            and metrics.get("abstention_correctness") is not None
+        )
+        return EvaluatorReportReference(
+            evaluator="answer_ragas",
+            run_id=envelope.run_id,
+            path=str(path),
+            digest=_sha256(path),
+            available=True,
+            evaluation_complete=complete,
+            error=None if complete else "answer/RAGAS evaluation incomplete or dataset mismatch",
+        ), {
+            "supported_subset_ragas": ragas,
+            "outcome_accuracy": metrics.get("outcome_accuracy"),
+            "unsupported_computation_recall": metrics.get(
+                "unsupported_computation_recall"
+            ),
+            "abstention_correctness": metrics.get("abstention_correctness"),
+        }
+    except Exception as exc:
+        return _missing_evaluator("answer_ragas", path, _safe_error(exc)["message"]), empty
 
 
 def _all_dataset_records(workflow_path: Path) -> list[DatasetRecord]:
@@ -560,6 +1474,34 @@ def _dataset_record(path: Path, name: str, role: str) -> DatasetRecord:
     return DatasetRecord(name=name, path=str(path), sha256=_sha256(path), available=True, record_count=sum(1 for line in path.read_text(encoding="utf-8").splitlines() if line.strip()), role=role)
 
 
+def _check_frozen_dataset_integrity(
+    records: list[DatasetRecord],
+) -> dict[str, Any]:
+    actual = {record.name: record for record in records}
+    expected = {
+        "retrieval_eval_v2": FROZEN_RETRIEVAL_DATASET_SHA256,
+        "v2_qa_annotations": FROZEN_ANNOTATION_DATASET_SHA256,
+        "module4_grade_route_gold": FROZEN_MODULE4_GOLD_SHA256,
+    }
+    checks = {
+        name: bool(
+            actual.get(name)
+            and actual[name].available
+            and actual[name].sha256 == digest
+        )
+        for name, digest in expected.items()
+    }
+    return {
+        "passed": all(checks.values()),
+        "evaluated": True,
+        "checks": checks,
+        "expected_sha256": expected,
+        "actual_sha256": {
+            name: actual[name].sha256 if name in actual else None for name in expected
+        },
+    }
+
+
 def _check_retrieval_gate(path: Path) -> dict[str, Any]:
     if not path.is_file() or not RETRIEVAL_DATASET.is_file():
         return {"passed": False, "evaluated": False, "status": "not_found", "path": str(path)}
@@ -574,20 +1516,27 @@ def _check_retrieval_gate(path: Path) -> dict[str, Any]:
         return {"passed": False, "evaluated": False, "status": "invalid", "path": str(path), "error": _safe_error(exc)}
 
 
-def _check_cross_process_gate(path: Path | None) -> dict[str, Any]:
+def _check_cross_process_gate(
+    path: Path | None, *, current_git_commit: str | None = None
+) -> dict[str, Any]:
     if path is None or not path.is_file():
         return {"passed": False, "evaluated": False, "status": "not_provided" if path is None else "not_found"}
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
         evidence = CrossProcessEvidence.model_validate(payload)
-        canonical = evidence.model_dump(mode="json")
-        digest = canonical.pop("artifact_digest")
-        digest_ok = digest == _json_digest({**canonical, "artifact_digest": ""})
+        digest = evidence.artifact_digest
+        digest_ok = digest == _json_digest(
+            {key: value for key, value in payload.items() if key != "artifact_digest"}
+        )
         names = [step.name for step in evidence.steps]
         ids_ok = all(step.request_id == evidence.request_id and step.thread_id == evidence.thread_id for step in evidence.steps)
         negative_ok = all((evidence.duplicate_resume_passed, evidence.stale_resume_passed, evidence.invalid_payload_passed, evidence.expired_checkpoint_passed, evidence.lease_recovery_passed))
-        passed = digest_ok and names == ["start", "status_waiting", "resume", "status_completed"] and ids_ok and negative_ok and all(step.passed for step in evidence.steps)
-        return {"passed": passed, "evaluated": True, "status": "checked", "path": str(path), "sha256": _sha256(path), "digest_valid": digest_ok, "request_id": evidence.request_id, "thread_id": evidence.thread_id, "step_count": len(evidence.steps), "negative_contracts": negative_ok}
+        allowed_commits = {MODULE8_FROZEN_IMPLEMENTATION_SHA}
+        if current_git_commit is not None:
+            allowed_commits.add(current_git_commit)
+        commit_ok = evidence.git_commit in allowed_commits
+        passed = digest_ok and names == ["start", "status_waiting", "resume", "status_completed"] and ids_ok and evidence.request_id == evidence.thread_id and negative_ok and commit_ok and all(step.passed for step in evidence.steps)
+        return {"passed": passed, "evaluated": True, "status": "checked", "path": str(path), "sha256": _sha256(path), "run_id": evidence.run_id, "digest_valid": digest_ok, "git_commit_allowed": commit_ok, "allowed_git_commits": sorted(allowed_commits), "request_id": evidence.request_id, "thread_id": evidence.thread_id, "step_count": len(evidence.steps), "negative_contracts": negative_ok}
     except Exception as exc:
         return {"passed": False, "evaluated": False, "status": "invalid", "path": str(path), "error": _safe_error(exc)}
 
@@ -655,10 +1604,33 @@ def main() -> None:
     parser.add_argument("--dataset", type=Path, default=DEFAULT_DATASET)
     parser.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT)
     parser.add_argument("--mode", choices=("all", "real", "contract"), default="all")
+    parser.add_argument(
+        "--profile",
+        choices=("development_contract", "development_real", "full_baseline"),
+    )
     parser.add_argument("--retrieval-report", type=Path, default=DEFAULT_RETRIEVAL_REPORT)
     parser.add_argument("--cross-process-report", type=Path, default=None)
+    parser.add_argument("--planning-report", type=Path)
+    parser.add_argument("--module4-gold-report", type=Path)
+    parser.add_argument("--answer-ragas-report", type=Path)
+    parser.add_argument("--stage-v21-report", type=Path)
+    parser.add_argument("--stage-v22-report", type=Path)
+    parser.add_argument("--stage-v23-report", type=Path)
     args = parser.parse_args()
-    report = evaluate_baseline(dataset_path=args.dataset, output_root=args.output_root, mode=args.mode, retrieval_report=args.retrieval_report, cross_process_report=args.cross_process_report)
+    report = evaluate_baseline(
+        dataset_path=args.dataset,
+        output_root=args.output_root,
+        mode=args.mode,
+        profile=args.profile,
+        retrieval_report=args.retrieval_report,
+        cross_process_report=args.cross_process_report,
+        planning_report=args.planning_report,
+        module4_gold_report=args.module4_gold_report,
+        answer_ragas_report=args.answer_ragas_report,
+        stage_v21_report=args.stage_v21_report,
+        stage_v22_report=args.stage_v22_report,
+        stage_v23_report=args.stage_v23_report,
+    )
     print(json.dumps({"run_id": report["run_id"], "output": str(args.output_root / report["run_id"]), "baseline_status": report["baseline_status"], "failed_gates": report["failed_gates"]}, ensure_ascii=False, indent=2))
 
 

@@ -15,6 +15,7 @@ from typing import Any
 from agenticrag.v2.answering import FindingGenerator, HITLContentGenerator, SynthesisGenerator
 from agenticrag.v2.config import V2Config
 from agenticrag.v2.grading import EvidenceGradingError
+from agenticrag.v2.hitl import HITLResumeService
 from agenticrag.v2.module4 import Module4Service
 from agenticrag.v2.module6 import Module6Service
 from agenticrag.v2.planning import PlanningResult
@@ -33,6 +34,7 @@ from agenticrag.v2.schemas import (
     RetrievalLatency,
     SynthesizedAnswer,
     StageRunResult,
+    ResumeRequest,
     TaskDraft,
 )
 from agenticrag.v2.types import RecoveryStrategy, Route, TaskCapability
@@ -112,9 +114,16 @@ class DeterministicBackend:
 
 
 class DeterministicGrader:
-    def __init__(self, telemetry: HarnessTelemetry, *, route: Route | None, strategy: RecoveryStrategy | None, fault: str) -> None:
+    def __init__(
+        self,
+        telemetry: HarnessTelemetry,
+        *,
+        route_sequence: list[Route],
+        strategy: RecoveryStrategy | None,
+        fault: str,
+    ) -> None:
         self.telemetry = telemetry
-        self.route = route
+        self.route_sequence = route_sequence
         self.strategy = strategy
         self.fault = fault
         self._calls: dict[str, int] = {}
@@ -132,7 +141,13 @@ class DeterministicGrader:
             )
         call_number = self._calls.get(task.id, 0) + 1
         self._calls[task.id] = call_number
-        if self.route == "recover" and call_number == 1:
+        route = self.route_sequence[min(call_number - 1, len(self.route_sequence) - 1)]
+        if route == "recover" or (
+            call_number > 1
+            and self.route_sequence
+            and self.route_sequence[0] == "recover"
+            and route == "no_knowledge"
+        ):
             failure_reason = {
                 "direct_rewrite": "insufficient_coverage",
                 "step_back": "overly_specific",
@@ -148,18 +163,18 @@ class DeterministicGrader:
                 missing_information=["requested fact"],
                 supporting_evidence_ids=[item.evidence_id for item in evidence],
             ), 1
-        if self.route == "clarify":
+        if route == "clarify":
             return EvidenceGrade(
                 relevance="weak", answerability="none", ambiguity="missing_slot",
                 recoverability="none", failure_reason="none", reason="missing year",
                 missing_slots=["year"],
             ), 1
-        if self.route == "scope_select":
+        if route == "scope_select":
             return EvidenceGrade(
                 relevance="weak", answerability="none", ambiguity="multiple_candidates",
                 recoverability="none", failure_reason="none", reason="multiple scopes",
             ), 1
-        if self.route == "no_knowledge":
+        if route == "no_knowledge":
             return EvidenceGrade(
                 relevance="none", answerability="none", ambiguity="none",
                 recoverability="none", failure_reason="none", reason="no supported fact",
@@ -253,7 +268,13 @@ def run_contract_scenario(scenario: Any, config: V2Config) -> HarnessResult:
     telemetry = HarnessTelemetry()
     backend = DeterministicBackend(telemetry, fault=scenario.fault)
     planner = DeterministicPlanner(complexity=scenario.complexity, capability=capability)
-    grader = DeterministicGrader(telemetry, route=route, strategy=strategy, fault=scenario.fault)
+    route_sequence = list(scenario.fixture.route_sequence) or [route or "answer"]
+    grader = DeterministicGrader(
+        telemetry,
+        route_sequence=route_sequence,
+        strategy=strategy,
+        fault=scenario.fault,
+    )
     retrieval = RetrievalFanoutService(backend, config)
     if scenario.stage == "v2_1":
         service = Module4Service(config, planner=planner, retrieval=retrieval, grader=grader)
@@ -269,9 +290,20 @@ def run_contract_scenario(scenario: Any, config: V2Config) -> HarnessResult:
     )
     if scenario.stage == "v2_3":
         from langgraph.checkpoint.memory import MemorySaver
+        from langgraph.types import Command
 
         from agenticrag.v2.graph import build_graph_v2_3, initial_v2_3_state
 
+        finding = DeterministicFinding(telemetry)
+        synthesis = DeterministicSynthesis(telemetry)
+        resume_service = HITLResumeService(
+            config,
+            backend=backend,
+            grader=grader,
+            recovery=recovery,
+            finding=finding,
+            synthesis=synthesis,
+        )
         graph = build_graph_v2_3(
             checkpointer=MemorySaver(),
             config=config,
@@ -279,16 +311,44 @@ def run_contract_scenario(scenario: Any, config: V2Config) -> HarnessResult:
             retrieval=retrieval,
             grader=grader,
             recovery=recovery,
-            finding=DeterministicFinding(telemetry),
-            synthesis=DeterministicSynthesis(telemetry),
+            finding=finding,
+            synthesis=synthesis,
             hitl=hitl,
+            resume_service=resume_service,
         )
         initial = initial_v2_3_state(
             scenario.question,
             response_language=_language(scenario),
         )
         graph_config = {"configurable": {"thread_id": initial["request_id"]}}
-        graph_state = graph.invoke(initial, config=graph_config)
+        graph.invoke(initial, config=graph_config)
+        if scenario.fixture.resume_request is not None:
+            interrupted_state = graph.get_state(graph_config).values
+            pending = interrupted_state["pending_hitl_request"]
+            responses = []
+            for item in pending.items:
+                if item.action == "clarify":
+                    responses.append(
+                        {
+                            "item_id": item.id,
+                            "clarify_values": {
+                                slot: "2019" for slot in item.missing_slots
+                            },
+                        }
+                    )
+                else:
+                    responses.append(
+                        {
+                            "item_id": item.id,
+                            "selected_option_id": item.scope_options[0].id,
+                        }
+                    )
+            request = ResumeRequest(
+                request_id=interrupted_state["request_id"],
+                hitl_request_id=pending.id,
+                responses=responses,
+            )
+            graph.invoke(Command(resume=request.model_dump(mode="json")), config=graph_config)
         state = graph.get_state(graph_config).values
         stage = StageRunResult(
             request_id=state["request_id"],

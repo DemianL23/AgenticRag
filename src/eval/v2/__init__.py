@@ -1,10 +1,14 @@
 """V2 stage-specific evaluation helpers."""
 
+from .answer_baseline import evaluate_v2_answers, write_answer_report
+
 from .final_baseline import (
     BaselineCandidateReport,
     CrossProcessEvidence,
     CrossProcessStep,
     DatasetRecord,
+    EvaluationCompleteness,
+    EvaluatorReportReference,
     HardGateResult,
     InvariantCounts,
     ScenarioResult,
@@ -29,6 +33,8 @@ from .planning import (
 
 __all__ = [
     "CoverageJudgeResult",
+    "evaluate_v2_answers",
+    "write_answer_report",
     "PlanningAnnotation",
     "PlanningJudgeConfig",
     "PlanningCoverageJudge",
@@ -39,6 +45,8 @@ __all__ = [
     "ScenarioExpected",
     "ScenarioFixture",
     "DatasetRecord",
+    "EvaluationCompleteness",
+    "EvaluatorReportReference",
     "ScenarioResult",
     "InvariantCounts",
     "HardGateResult",

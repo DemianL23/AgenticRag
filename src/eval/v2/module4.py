@@ -198,6 +198,8 @@ def evaluate_module4(
         predictions.append(item)
 
     report = {
+        "report_schema_version": 1,
+        "producer": "v2_1_stage_evaluator",
         "run_id": run_id,
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "git_commit": _git_commit(),
@@ -250,13 +252,27 @@ def evaluate_module4(
         "invariant_evaluation": "evaluated",
         "predictions": predictions,
         "elapsed_seconds": time.perf_counter() - started,
+        "target_stage": "v2_1",
+        "artifact_digest": "",
     }
+    report["artifact_digest"] = _report_digest(report)
     report_dir.mkdir(parents=True, exist_ok=True)
     (report_dir / "report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n")
     with (report_dir / "predictions.jsonl").open("w") as handle:
         for item in predictions:
             handle.write(json.dumps(item, ensure_ascii=False) + "\n")
     return report
+
+
+def _report_digest(report: dict[str, Any]) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            {**report, "artifact_digest": ""},
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+    ).hexdigest()
 
 
 def _deterministic_unsupported_tasks(record: dict[str, Any]):
