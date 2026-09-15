@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 import re
 import sqlite3
+import threading
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -31,7 +32,7 @@ from .persistence import (
 )
 from .policies import validate_resume_request
 from .schemas import ExecutionError, ResumeRequest, StageRunResult
-from .state import V2State
+from .state import V2State, V2_STATE_SCHEMA_VERSION
 
 UTC = timezone.utc
 
@@ -87,6 +88,85 @@ class DurableStatus:
         return result
 
 
+class _LeaseHeartbeat:
+    """Bounded lease renewal worker used only around one durable execution."""
+
+    def __init__(
+        self,
+        repository: RequestMetadataRepository,
+        lease: Lease,
+        *,
+        duration_seconds: int,
+        interval_seconds: float,
+        on_renew: Callable[[Lease], None] | None = None,
+    ) -> None:
+        if interval_seconds <= 0 or interval_seconds >= duration_seconds:
+            raise ValueError("lease heartbeat interval must be shorter than lease duration")
+        self.repository = repository
+        self._lease = lease
+        self.duration_seconds = duration_seconds
+        self.interval_seconds = interval_seconds
+        self.on_renew = on_renew
+        self._stop = threading.Event()
+        self._lost: PersistenceError | None = None
+        self._lock = threading.Lock()
+        self._thread: threading.Thread | None = None
+        self.renewal_count = 0
+
+    def start(self) -> None:
+        if self._thread is not None:
+            raise RuntimeError("lease heartbeat already started")
+        self._thread = threading.Thread(
+            target=self._run,
+            name="agenticrag-v2-lease-heartbeat",
+            daemon=True,
+        )
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join()
+            self._thread = None
+
+    def __enter__(self) -> "_LeaseHeartbeat":
+        self.start()
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self.stop()
+
+    def current_lease(self) -> Lease:
+        with self._lock:
+            return self._lease
+
+    def raise_if_lost(self) -> None:
+        with self._lock:
+            failure = self._lost
+        if failure is not None:
+            raise failure
+
+    def _run(self) -> None:
+        while not self._stop.wait(self.interval_seconds):
+            try:
+                renewed = self.repository.renew_lease(
+                    self.current_lease(), duration_seconds=self.duration_seconds
+                )
+                with self._lock:
+                    self._lease = renewed
+                    self.renewal_count += 1
+                if self.on_renew is not None:
+                    self.on_renew(renewed)
+            except Exception as exc:
+                failure = PersistenceError(
+                    "resume_conflict",
+                    _safe_error_message(exc) or "lease heartbeat failed",
+                )
+                with self._lock:
+                    self._lost = failure
+                return
+
+
 class DurableV23Service:
     """Start, inspect, resume, and clean up durable V2.3 requests."""
 
@@ -106,6 +186,7 @@ class DurableV23Service:
         resume_service: HITLResumeService | None = None,
         owner_id: str | None = None,
         now_fn: Callable[[], datetime] | None = None,
+        heartbeat_interval_seconds: float | None = None,
     ) -> None:
         self.config = config or V2Config.from_env()
         self._now = now_fn or (lambda: datetime.now(UTC))
@@ -123,6 +204,7 @@ class DurableV23Service:
         else:
             self.checkpointer = checkpointer
         self.owner_id = owner_id or f"pid-{os.getpid()}-{uuid.uuid4()}"
+        self.heartbeat_interval_seconds = heartbeat_interval_seconds
         self.planner = planner
         self.retrieval = retrieval
         self.grader = grader
@@ -227,11 +309,18 @@ class DurableV23Service:
         request: ResumeRequest | dict[str, object],
     ) -> DurableRun:
         metadata = self.repository.get(request_id)
+        self._validate_metadata_state_schema(metadata)
         if metadata.error_code == "checkpoint_expired":
             raise PersistenceError("checkpoint_expired", "request TTL 已过期")
         if self._utc_now() >= metadata.expires_at and metadata.resumable:
             self.repository.mark_expired(request_id)
             raise PersistenceError("checkpoint_expired", "request TTL 已过期")
+        # Validate the durable business-state version before taking a lease or
+        # accepting a resume payload.  A missing checkpoint is left to the
+        # existing checkpoint_not_found path below so its lifecycle semantics
+        # remain unchanged.
+        preflight_state = self._checkpoint_state(metadata.thread_id)
+        self._validate_checkpoint_state_schema(metadata, preflight_state)
         pending = metadata.pending_hitl_request
         if pending is None:
             if metadata.consumed_resume_digest is not None:
@@ -267,8 +356,11 @@ class DurableV23Service:
             token=str(uuid.uuid4()),
             duration_seconds=self.config.persistence.lease_duration_seconds,
         )
+        active_lease = lease
+        heartbeat: _LeaseHeartbeat | None = None
         try:
             current = self.repository.get(request_id)
+            self._validate_metadata_state_schema(current)
             if current.consumed_resume_digest is not None:
                 if digest == current.consumed_resume_digest and current.consumed_result:
                     return self._idempotent_result(current)
@@ -286,6 +378,7 @@ class DurableV23Service:
                 self.repository.update_stage(request_id, failed, lease=lease)
                 raise PersistenceError("checkpoint_not_found", "LangGraph checkpoint 不存在")
             checkpoint_state = self._checkpoint_state(current.thread_id)
+            self._validate_checkpoint_state_schema(current, checkpoint_state)
             if checkpoint_state is None or not _checkpoint_matches_pending(
                 checkpoint_state, current
             ):
@@ -302,38 +395,57 @@ class DurableV23Service:
                     "request_not_resumable",
                     "metadata 与 LangGraph waiting checkpoint 不一致",
                 )
-            graph = self._graph()
-            raw_result = graph.invoke(
-                Command(resume=candidate.model_dump(mode="json")),
-                self._graph_config(current.thread_id),
+            heartbeat = _LeaseHeartbeat(
+                self.repository,
+                active_lease,
+                duration_seconds=self.config.persistence.lease_duration_seconds,
+                interval_seconds=self._heartbeat_interval_seconds(),
             )
-            state = _state_without_graph_meta(raw_result)
-            stage = state.get("stage_result")
-            if not isinstance(stage, StageRunResult):
-                raise PersistenceError(
-                    "checkpoint_write_failed", "resume graph did not produce StageRunResult"
+            with heartbeat:
+                graph = self._graph()
+                raw_result = graph.invoke(
+                    Command(resume=candidate.model_dump(mode="json")),
+                    self._graph_config(current.thread_id),
                 )
-            updated = self.repository.update_stage(
-                request_id,
-                stage,
-                pending=state.get("pending_hitl_request"),
-                consumed_resume_digest=digest,
-                consumed_hitl_request_id=candidate.hitl_request_id,
-                lease=lease,
-            )
-            del updated
-            return DurableRun(request_id, current.thread_id, state, stage)
+                state = _state_without_graph_meta(raw_result)
+                stage = state.get("stage_result")
+                if not isinstance(stage, StageRunResult):
+                    raise PersistenceError(
+                        "checkpoint_write_failed", "resume graph did not produce StageRunResult"
+                    )
+                # Stop renewal before the authoritative metadata write.  This
+                # closes the small race where a failed heartbeat could arrive
+                # after the health check but before commit.
+                heartbeat.stop()
+                heartbeat.raise_if_lost()
+                active_lease = heartbeat.current_lease()
+                heartbeat.raise_if_lost()
+                updated = self.repository.update_stage(
+                    request_id,
+                    stage,
+                    pending=state.get("pending_hitl_request"),
+                    consumed_resume_digest=digest,
+                    consumed_hitl_request_id=candidate.hitl_request_id,
+                    lease=active_lease,
+                )
+                del updated
+                return DurableRun(request_id, current.thread_id, state, stage)
         except HITLResumeError:
             raise
         except PersistenceError as exc:
-            if exc.code in {"checkpoint_not_found", "checkpoint_expired", "resume_conflict"}:
+            if exc.code in {
+                "checkpoint_not_found",
+                "checkpoint_expired",
+                "checkpoint_version_incompatible",
+                "resume_conflict",
+            }:
                 raise
             failed = _failed_stage(request_id, exc.code, exc)
             self.repository.update_stage(
                 request_id,
                 failed,
                 consumed_resume_digest=digest,
-                lease=lease,
+                lease=active_lease,
             )
             raise
         except Exception as exc:
@@ -342,13 +454,15 @@ class DurableV23Service:
                 request_id,
                 failed,
                 consumed_resume_digest=digest,
-                lease=lease,
+                lease=active_lease,
             )
             raise PersistenceError(
                 "durable_execution_failed", _safe_error_message(exc)
             ) from exc
         finally:
-            self.repository.release_lease(lease)
+            if heartbeat is not None:
+                active_lease = heartbeat.current_lease()
+            self.repository.release_lease(active_lease)
 
     def cleanup(self, *, apply: bool = False):
         report = self.repository.cleanup_expired(apply=False)
@@ -397,11 +511,41 @@ class DurableV23Service:
         if stage is None:
             raise PersistenceError("resume_conflict", "缺少已消费 resume result")
         state = self._checkpoint_state(metadata.thread_id)
+        self._validate_checkpoint_state_schema(metadata, state)
         if state is None:
             # The business result is still deterministic, but a missing graph
             # checkpoint must remain visible to callers as a persistence error.
             raise PersistenceError("checkpoint_not_found", "LangGraph checkpoint 不存在")
         return DurableRun(metadata.request_id, metadata.thread_id, state, stage)
+
+    def _heartbeat_interval_seconds(self) -> float:
+        duration = float(self.config.persistence.lease_duration_seconds)
+        if self.heartbeat_interval_seconds is not None:
+            return self.heartbeat_interval_seconds
+        # A fraction-based default stays below every supported lease duration;
+        # the cap keeps long leases responsive without needless writes.
+        return min(duration / 3.0, 30.0)
+
+    @staticmethod
+    def _validate_metadata_state_schema(metadata: RequestMetadata) -> None:
+        if metadata.state_schema_version != V2_STATE_SCHEMA_VERSION:
+            raise PersistenceError(
+                "checkpoint_version_incompatible",
+                "metadata state schema version 不兼容；不执行自动迁移",
+            )
+
+    @classmethod
+    def _validate_checkpoint_state_schema(
+        cls, metadata: RequestMetadata, state: V2State | None
+    ) -> None:
+        cls._validate_metadata_state_schema(metadata)
+        if state is None:
+            return
+        if state.get("state_schema_version") != metadata.state_schema_version:
+            raise PersistenceError(
+                "checkpoint_version_incompatible",
+                "checkpoint state schema version 与 metadata 不一致；不执行自动迁移",
+            )
 
     def _graph(self):
         kwargs: dict[str, object] = {"config": self.config, "checkpointer": self.checkpointer}

@@ -7,6 +7,7 @@ from .grading import EvidenceGrader, EvidenceGradingError
 from .graph import build_graph_v2_1, initial_v2_1_state
 from .graph import build_graph_v2_2, initial_v2_2_state, build_graph_v2_3
 from .graph import initial_v2_3_state
+from .state import V2_STATE_SCHEMA_VERSION
 from .answering import (
     AnswerGenerationError,
     FindingGenerator,
@@ -83,6 +84,7 @@ __all__ = [
     "initial_v2_2_state",
     "initial_v2_3_state",
     "build_graph_v2_3",
+    "V2_STATE_SCHEMA_VERSION",
     "AnswerGenerationError",
     "FindingGenerator",
     "HITLContentGenerator",

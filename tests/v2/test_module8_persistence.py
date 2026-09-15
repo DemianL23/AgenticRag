@@ -4,19 +4,23 @@ import json
 import os
 import sqlite3
 import subprocess
+import threading
 from datetime import datetime, timedelta, timezone
 
 import pytest
 
 from agenticrag.v2.config import V2BudgetConfig, V2Config, V2PersistenceConfig
-from agenticrag.v2.durable import DurableV23Service
+from agenticrag.v2.durable import DurableV23Service, _LeaseHeartbeat
 from agenticrag.v2.hitl import HITLResumeService
 from agenticrag.v2.retrieval import RetrievalFanoutService
 from agenticrag.v2.persistence import (
+    Lease,
+    LeaseConflictError,
     PersistenceError,
     RequestMetadataRepository,
     canonical_resume_digest,
 )
+from agenticrag.v2.state import V2_STATE_SCHEMA_VERSION
 from eval.v2.module8 import build_module8_report, evaluate_module8_start
 from agenticrag.v2.schemas import (
     ExecutionError,
@@ -174,6 +178,221 @@ def test_lease_is_atomic_and_expired_lease_is_recoverable(tmp_path) -> None:
     repo_b.release_lease(recovered)
     repo_a.close()
     repo_b.close()
+
+
+def test_lease_heartbeat_renews_across_original_expiry(tmp_path) -> None:
+    now = [datetime(2026, 1, 1, tzinfo=UTC)]
+    path = tmp_path / "heartbeat.sqlite3"
+    repo_a = RequestMetadataRepository(path, now_fn=lambda: now[0])
+    repo_b = RequestMetadataRepository(path, now_fn=lambda: now[0])
+    request_id = "4b7d9e2c-5f24-4b1d-8e6f-2c7a9b1d4e60"
+    repo_a.create(
+        request_id=request_id,
+        thread_id=request_id,
+        target_stage="v2_3",
+        expires_at=now[0] + timedelta(days=1),
+    )
+    lease = repo_a.acquire_lease(
+        request_id, owner="a", token="token-a", duration_seconds=1
+    )
+    original_expiry = lease.lease_until
+    renewed_after_clock_advance = threading.Event()
+
+    def on_renew(updated: Lease) -> None:
+        if updated.lease_until > original_expiry:
+            renewed_after_clock_advance.set()
+
+    heartbeat = _LeaseHeartbeat(
+        repo_a,
+        lease,
+        duration_seconds=1,
+        interval_seconds=0.01,
+        on_renew=on_renew,
+    )
+    heartbeat.start()
+    now[0] += timedelta(milliseconds=500)
+    assert renewed_after_clock_advance.wait(1)
+    now[0] = datetime(2026, 1, 1, 0, 0, 1, 100000, tzinfo=UTC)
+    with pytest.raises(PersistenceError) as exc_info:
+        repo_b.acquire_lease(
+            request_id, owner="b", token="token-b", duration_seconds=1
+        )
+    assert exc_info.value.code == "resume_conflict"
+    heartbeat.stop()
+    repo_a.release_lease(heartbeat.current_lease())
+    repo_a.close()
+    repo_b.close()
+
+
+def test_stopped_heartbeat_allows_expired_lease_takeover(tmp_path) -> None:
+    now = [datetime(2026, 1, 1, tzinfo=UTC)]
+    path = tmp_path / "heartbeat-takeover.sqlite3"
+    repo_a = RequestMetadataRepository(path, now_fn=lambda: now[0])
+    repo_b = RequestMetadataRepository(path, now_fn=lambda: now[0])
+    request_id = "4b7d9e2c-5f24-4b1d-8e6f-2c7a9b1d4e60"
+    repo_a.create(
+        request_id=request_id,
+        thread_id=request_id,
+        target_stage="v2_3",
+        expires_at=now[0] + timedelta(days=1),
+    )
+    lease = repo_a.acquire_lease(
+        request_id, owner="a", token="token-a", duration_seconds=1
+    )
+    heartbeat = _LeaseHeartbeat(
+        repo_a, lease, duration_seconds=1, interval_seconds=0.01
+    )
+    heartbeat.start()
+    heartbeat.stop()
+    now[0] += timedelta(seconds=1)
+    recovered = repo_b.acquire_lease(
+        request_id, owner="b", token="token-b", duration_seconds=1
+    )
+    assert recovered.owner == "b"
+    repo_b.release_lease(recovered)
+    repo_a.close()
+    repo_b.close()
+
+
+def test_wrong_owner_or_token_cannot_renew_lease(tmp_path) -> None:
+    now = datetime(2026, 1, 1, tzinfo=UTC)
+    repo = RequestMetadataRepository(tmp_path / "renew-owner.sqlite3", now_fn=lambda: now)
+    request_id = "4b7d9e2c-5f24-4b1d-8e6f-2c7a9b1d4e60"
+    repo.create(
+        request_id=request_id,
+        thread_id=request_id,
+        target_stage="v2_3",
+        expires_at=now + timedelta(days=1),
+    )
+    lease = repo.acquire_lease(
+        request_id, owner="a", token="token-a", duration_seconds=60
+    )
+    with pytest.raises(LeaseConflictError):
+        repo.renew_lease(
+            Lease(request_id, "other", "token-a", lease.lease_until),
+            duration_seconds=60,
+        )
+    with pytest.raises(LeaseConflictError):
+        repo.renew_lease(
+            Lease(request_id, "a", "other-token", lease.lease_until),
+            duration_seconds=60,
+        )
+    repo.release_lease(lease)
+    repo.close()
+
+
+def test_failed_heartbeat_cannot_commit_successful_resume(tmp_path) -> None:
+    config = _config(
+        tmp_path / "heartbeat-failure.sqlite3",
+    ).model_copy(
+        update={
+            "persistence": V2PersistenceConfig(
+                sqlite_path=str(tmp_path / "heartbeat-failure.sqlite3"),
+                lease_duration_seconds=1,
+            )
+        }
+    )
+    service, *_ = make_runtime(config)
+    request_id = "4b7d9e2c-5f24-4b1d-8e6f-2c7a9b1d4e60"
+    service.start("Which year?", request_id=request_id)
+    entered = threading.Event()
+    release = threading.Event()
+    heartbeat_failed = threading.Event()
+
+    class BlockingGraph:
+        def invoke(self, *_args: object, **_kwargs: object) -> dict[str, object]:
+            entered.set()
+            assert release.wait(1)
+            return {"stage_result": _stage(request_id)}
+
+    service._graph = lambda: BlockingGraph()  # type: ignore[method-assign]
+
+    def fail_renewal(*_args: object, **_kwargs: object) -> Lease:
+        heartbeat_failed.set()
+        raise LeaseConflictError("simulated lost lease")
+
+    service.repository.renew_lease = fail_renewal  # type: ignore[method-assign]
+    errors: list[PersistenceError] = []
+
+    def resume() -> None:
+        try:
+            service.resume(request_id, _resume(request_id))
+        except PersistenceError as exc:
+            errors.append(exc)
+
+    worker = threading.Thread(target=resume)
+    worker.start()
+    assert entered.wait(1)
+    assert heartbeat_failed.wait(1)
+    release.set()
+    worker.join(1)
+    assert not worker.is_alive()
+    assert errors and errors[0].code == "resume_conflict"
+    metadata = service.status(request_id).metadata
+    assert metadata.execution_status == "waiting_user"
+    assert metadata.resumable is True
+    assert metadata.consumed_resume_digest is None
+    service.close()
+
+
+def test_initial_v23_state_uses_supported_state_schema_version() -> None:
+    from agenticrag.v2.graph import initial_v2_3_state
+
+    assert initial_v2_3_state("Which year?")["state_schema_version"] == V2_STATE_SCHEMA_VERSION
+
+
+def test_unknown_metadata_state_schema_is_rejected_before_resume(tmp_path) -> None:
+    config = _config(tmp_path / "metadata-state-version.sqlite3")
+    service, backend, grader, finding, _ = make_runtime(config)
+    request_id = "4b7d9e2c-5f24-4b1d-8e6f-2c7a9b1d4e60"
+    service.start("Which year?", request_id=request_id)
+    service.repository.connection.execute(
+        "UPDATE v2_requests SET state_schema_version='unknown' WHERE request_id=?",
+        (request_id,),
+    )
+    with pytest.raises(PersistenceError) as exc_info:
+        service.resume(request_id, _resume(request_id))
+    assert exc_info.value.code == "checkpoint_version_incompatible"
+    assert len(backend.calls) == 1
+    assert len(grader.calls) == 1
+    assert len(finding.calls) == 0
+    metadata = service.status(request_id).metadata
+    assert metadata.state_schema_version == "unknown"
+    service.close()
+
+
+def test_unknown_checkpoint_state_schema_is_rejected_before_resume(tmp_path) -> None:
+    config = _config(tmp_path / "checkpoint-state-version.sqlite3")
+    service, backend, grader, finding, _ = make_runtime(config)
+    request_id = "4b7d9e2c-5f24-4b1d-8e6f-2c7a9b1d4e60"
+    service.start("Which year?", request_id=request_id)
+    service._graph().update_state(
+        service._graph_config(request_id), {"state_schema_version": "unknown"}
+    )
+    with pytest.raises(PersistenceError) as exc_info:
+        service.resume(request_id, _resume(request_id))
+    assert exc_info.value.code == "checkpoint_version_incompatible"
+    assert len(backend.calls) == 1
+    assert len(grader.calls) == 1
+    assert len(finding.calls) == 0
+    service.close()
+
+
+def test_metadata_and_checkpoint_state_schema_versions_must_match(tmp_path) -> None:
+    config = _config(tmp_path / "checkpoint-mismatch.sqlite3")
+    service, backend, grader, finding, _ = make_runtime(config)
+    request_id = "4b7d9e2c-5f24-4b1d-8e6f-2c7a9b1d4e60"
+    service.start("Which year?", request_id=request_id)
+    service._graph().update_state(
+        service._graph_config(request_id), {"state_schema_version": "v2_3-old"}
+    )
+    with pytest.raises(PersistenceError) as exc_info:
+        service.resume(request_id, _resume(request_id))
+    assert exc_info.value.code == "checkpoint_version_incompatible"
+    assert len(backend.calls) == 1
+    assert len(grader.calls) == 1
+    assert len(finding.calls) == 0
+    service.close()
 
 
 def test_durable_v23_waits_then_reopens_and_resumes(tmp_path) -> None:

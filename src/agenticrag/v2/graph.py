@@ -38,7 +38,7 @@ from .schemas import (
     StageRunResult,
     SynthesizedAnswer,
 )
-from .state import V2State
+from .state import V2State, V2_STATE_SCHEMA_VERSION
 
 
 def initial_v2_1_state(
@@ -82,6 +82,7 @@ def initial_v2_3_state(
         target_stage="v2_3",
         request_id=request_id,
         response_language=response_language,
+        state_schema_version=V2_STATE_SCHEMA_VERSION,
     )
 
 
@@ -91,6 +92,7 @@ def _initial_state(
     target_stage: Literal["v2_1", "v2_2", "v2_3"],
     request_id: str | None,
     response_language: str | None,
+    state_schema_version: str | None = None,
 ) -> V2State:
     normalized = normalize_query(question)
     resolved_request_id = request_id or new_request_id()
@@ -116,7 +118,7 @@ def _initial_state(
         "answer_outcome": None,
         "final_answer": None,
         "error": None,
-        "state_schema_version": target_stage,
+        "state_schema_version": state_schema_version or target_stage,
         "stage_result": None,
     }
 

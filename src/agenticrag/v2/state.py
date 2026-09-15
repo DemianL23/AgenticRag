@@ -18,6 +18,10 @@ from .schemas import (
 from .planning import PlanningResult
 from .types import GlobalAnswerOutcome, GlobalExecutionStatus, ResponseLanguage, TargetStage
 
+# The durable V2.3 boundary has one supported business-state version.  Keep
+# this beside the state contract so metadata and checkpoints cannot drift.
+V2_STATE_SCHEMA_VERSION = "v2_3"
+
 
 def merge_tasks(
     current: dict[str, object], update: dict[str, object]

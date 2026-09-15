@@ -18,6 +18,7 @@ from typing import Callable
 from .config import V2PersistenceConfig
 from .ids import validate_request_id
 from .schemas import HITLRequest, ResumeRequest, StageRunResult
+from .state import V2_STATE_SCHEMA_VERSION
 
 SCHEMA_VERSION = 1
 UTC = timezone.utc
@@ -188,7 +189,7 @@ class RequestMetadataRepository:
         thread_id: str,
         target_stage: str,
         expires_at: datetime,
-        state_schema_version: str = "v2_3",
+        state_schema_version: str = V2_STATE_SCHEMA_VERSION,
         checkpoint_ref: str | None = None,
     ) -> RequestMetadata:
         validate_request_id(request_id)
@@ -280,8 +281,8 @@ class RequestMetadataRepository:
         else:
             consumed_sql = ""
         if lease is not None:
-            where += " AND lease_owner = ? AND lease_token = ?"
-            params.extend([lease.owner, lease.token])
+            where += " AND lease_owner = ? AND lease_token = ? AND lease_until > ?"
+            params.extend([lease.owner, lease.token, _format_time(now)])
         cursor = self.connection.execute(
             f"""
             UPDATE v2_requests SET
@@ -335,6 +336,47 @@ class RequestMetadataRepository:
                 self.connection.rollback()
             raise
         return Lease(request_id, owner, token, lease_until)
+
+    def renew_lease(self, lease: Lease, *, duration_seconds: int) -> Lease:
+        """Atomically extend a lease only while its owner/token still match."""
+
+        now = self._now()
+        lease_until = now + timedelta(seconds=duration_seconds)
+        self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            cursor = self.connection.execute(
+                """
+                UPDATE v2_requests
+                SET lease_until=?, updated_at=?
+                WHERE request_id=?
+                  AND lease_owner=?
+                  AND lease_token=?
+                  AND lease_until > ?
+                """,
+                (
+                    _format_time(lease_until),
+                    _format_time(now),
+                    lease.request_id,
+                    lease.owner,
+                    lease.token,
+                    _format_time(now),
+                ),
+            )
+            if cursor.rowcount != 1:
+                self.connection.rollback()
+                raise LeaseConflictError("request lease renewal failed")
+            self.connection.commit()
+        except LeaseConflictError:
+            if self.connection.in_transaction:
+                self.connection.rollback()
+            raise
+        except sqlite3.Error as exc:
+            if self.connection.in_transaction:
+                self.connection.rollback()
+            raise PersistenceError(
+                "checkpoint_write_failed", "request lease renewal failed"
+            ) from exc
+        return Lease(lease.request_id, lease.owner, lease.token, lease_until)
 
     def release_lease(self, lease: Lease) -> None:
         self.connection.execute(
