@@ -1553,6 +1553,208 @@ Finding preservation 或 Module 6 aggregation/provenance semantics。
 - TTL、schema version、lease、idempotent resume、cleanup。
 - V2.3 Graph 与跨进程 CLI 测试。
 
+#### Module 8 Freeze Record
+
+Module 8（SQLite Persistence / Durable HITL）状态：**FROZEN**。
+
+- Implementation baseline：`891ef20d218ed3e01d7b3a54ac5b50bde628dc52`
+- Initial implementation：`1d9045d1179268a0db8eafc8f4a669a7aaf46618`
+- Initial review：CHANGES REQUESTED，BLOCKING ISSUES：2
+- Review-fix：`891ef20d218ed3e01d7b3a54ac5b50bde628dc52`
+- Final review：CODE REVIEW: PASS，BLOCKING ISSUES：0
+
+Module 7 定义 logical HITL resume contract；Module 8 将其升级为可跨进程、可重启恢复的
+durable V2.3 workflow，包含 official LangGraph SQLite checkpointing、durable request lifecycle、
+TTL、schema compatibility、execution lease、lease heartbeat、idempotent resume、stale resume
+protection、checkpoint cleanup，以及 status/resume CLI。
+
+#### Persistence Architecture
+
+Module 8 冻结两个职责层：
+
+- LangGraph `SqliteSaver` 负责 graph execution checkpoint、durable node position、interrupt/resume
+  continuation，以及恢复所需的 V2 business state。
+- `v2_requests` metadata repository 负责 request/thread identity、business lifecycle、
+  `execution_status`、`answer_outcome`、`resumable`、pending HITL metadata、TTL、schema version、
+  lease、resume idempotency、error state 和 cleanup eligibility。
+
+LangGraph checkpoint 不等于 business metadata repository；普通 status/lookup 不依赖解析整个
+LangGraph checkpoint。
+
+#### Dependency and SQLite Contract
+
+- optional extra：`v2-persistence`
+- official package：`langgraph-checkpoint-sqlite==3.1.1`
+- official saver：`SqliteSaver`
+- Graph 使用 `compile(checkpointer=...)`
+- durable identity：`thread_id = request_id`
+- resume 使用 `Command(resume=...)`
+- 不使用自制 checkpoint engine。
+
+默认 SQLite path 为 `artifacts/checkpoints/v2/agenticrag_v2.sqlite3`，可由 `V2_SQLITE_PATH`
+覆盖。SQLite runtime files 不提交 Git；测试使用 temporary database。metadata 与 checkpointer
+可以共用 SQLite 文件，但职责保持分离。
+
+#### Serialization Contract
+
+Durable checkpoint 使用 JSON/domain serialization；关闭 pickle fallback，并对 V2 domain models
+执行 explicit allow-list。runtime clients、retrievers、database connections、callables、model
+clients、API keys 不进入 checkpoint。完整 RRF/union candidate diagnostics 不重复写入 checkpoint，
+只保留恢复需要的 compact retrieval information 或 trace reference。
+
+#### V2.3 Graph and Resume Contract
+
+正式实现 `build_graph_v2_3(...)`。V2.3 复用 frozen V2.2 business nodes，并将 durable HITL 边界
+固定为：
+
+`build_hitl_request → await_user_input → LangGraph interrupt()`。
+
+`Command(resume=...)` 恢复同一 thread，`await_user_input` 将 accepted payload 交给 frozen
+Module 7 `HITLResumeService` exactly once，然后继续 affected-task continuation、aggregation、
+synthesis 和 terminalization。不存在第二套 ResumeRequest business semantics。
+
+一个 ResumeRequest 只允许一次业务消费；禁止重复创建 QR_002、重复增加 hitl round、重复 Retrieval、
+重复 Finding 或重复 Module 7 resume call。
+
+V2.2 继续保持 `waiting_user` / `resumable=false`，不得 durable resume；V2.2 durable resume 返回
+`request_not_resumable`。V2.3 只有在 checkpoint 成功持久化后才可返回 `waiting_user` /
+`resumable=true`；checkpoint/persistence 写失败不得产生 fake resumable result。
+
+#### Cross-process and Identity Contract
+
+固定验收链路为：Process A start V2.3 → interrupt → waiting_user 持久化并退出；Process B 以同一
+`request_id` 查询 status；Process C 以结构化 `ResumeRequest` resume 同一 durable thread；随后
+Process D 查询 completed 状态。不同 invocation 为独立 Python process；不要求进程 PID 在测试环境中
+具有唯一性。
+
+public `request_id` 为 UUID4，`thread_id` 始终等于 `request_id`。start、interrupt、status 和
+resume 不创建新的 thread identity。
+
+#### Resume Idempotency and Stale Request
+
+Resume identity 使用 canonicalized、JSON-safe ResumeRequest 表示的 SHA-256 digest。相同 payload
+重复提交必须返回已消费的 durable result，不得创建新的 QueryRevision、Retrieval、model call、
+Finding 或 HITL budget consumption。相同旧 HITL request 但 payload 不同返回 `resume_conflict`。
+
+当前 pending HITL 为 `HITL_N` 时收到旧 `HITL_M`，必须返回 `resume_conflict`，且不继续 graph、不改变
+budget、不调用 Retrieval/LLM、不创建 QueryRevision。
+
+#### TTL and Schema Compatibility
+
+- 默认 `V2_CHECKPOINT_TTL_SECONDS=604800`（7 days），可配置。
+- 过期 resume 返回 `checkpoint_expired`，且不得重启 original question、创建新 request/revision
+  或调用业务模型/Retrieval。
+- metadata schema version 为 `1`；它与 business state schema version 是两个不同概念，均不自动迁移。
+- 唯一 current durable business-state version 为 `V2_STATE_SCHEMA_VERSION = "v2_3"`，source of
+  truth 为 `src/agenticrag/v2/state.py`。
+- `initial_v2_3_state.state_schema_version == metadata.state_schema_version == checkpoint
+  state_schema_version == V2_STATE_SCHEMA_VERSION`。
+- metadata、checkpoint state 与 current supported version 任一不一致返回
+  `checkpoint_version_incompatible`，不静默改写旧状态。
+
+#### Lease and Ownership Contract
+
+resume 前必须获得 request-level lease，包含 `request_id`、`lease_owner`、`lease_token` 和
+`lease_until`。acquire 使用 atomic SQLite transaction；active lease 的第二 worker 返回
+`resume_conflict`，过期 lease 可被 takeover。
+
+长时间 resume 使用 lease heartbeat 定期 atomic renew。renew 条件必须匹配：
+
+`request_id + lease_owner + lease_token + lease_until > now`。
+
+heartbeat interval 按 lease duration 自动计算且小于 lease duration。worker crash 后 heartbeat
+停止，lease 自然过期，后续 worker 可以 takeover。renewal thread 会 clean stop、join，不能遗留
+无限后台任务。
+
+如果 worker 在 execution 中失去 lease，即使 graph/model 已经完成，也不得提交 authoritative
+success metadata。最终 metadata update 仍要求 owner/token match 且 `lease_until > now`；release
+同样使用 owner/token guarded update。Module 8 baseline 提供 ownership protection，但不强制取消
+已经发出的 LLM/network request。
+
+#### Metadata and Checkpoint Lifecycle
+
+metadata 与 checkpoint 正常路径保持同步：waiting 为 `execution_status=waiting_user`、
+`resumable=true`、pending HITL 当前；completed 为 `resumable=false`、合法 outcome、pending
+为空；failed 为 `resumable=false`、`answer_outcome=NULL`、明确 error code。metadata 存在而
+checkpoint 缺失返回 `checkpoint_not_found`，不得从原问题重启或映射为 business no_knowledge。
+
+cleanup 默认 dry-run，仅显式 `--execute`/`--apply` 删除 eligible expired metadata 与 checkpoint，
+不得误删 active lease、non-expired waiting request 或仍在 retention policy 内的记录。
+
+#### Module 7 Reuse and Replay Boundary
+
+Module 8 不重新实现 ResumeRequest validation、affected-task resolution、deterministic merge、
+QueryRevision creation、`user_clarified` ATT_001、budget 或 affected-task continuation；这些继续
+调用 frozen Module 7 `HITLResumeService`。durable resume 后仍保持 `QR_001 original → QR_002
+source=hitl`，新 revision append-only，且不因 restart/duplicate resume 创建 QR_003。
+
+Module 8 提供 node/checkpoint-level recovery，不提供 token-level continuation。节点中途失败时从
+最近 durable checkpoint replay 未提交节点；不能从 LLM 第 N 个 token 继续。未来 side-effectful
+tools 需要另行提供 idempotency keys。
+
+#### CLI and Observability Contract
+
+冻结 CLI：
+
+- `agenticrag-v2-run --stage v2_3`
+- `agenticrag-v2-status REQUEST_ID`
+- `agenticrag-v2-resume REQUEST_ID --input ...`
+- `agenticrag-v2-checkpoint-cleanup`
+- `agenticrag-eval-v2-module8`
+
+status 为 read-only request lifecycle lookup；cleanup 默认 dry-run。Stage report 区分 active
+execution time 与 HITL waiting wall time，并记录 checkpoint read/write latency、resume latency、
+lease conflict、duplicate resume、interrupt/resume count 等 persistence diagnostics。
+
+#### Local Validation
+
+以下为当前 implementation HEAD 的 local validation，不是 CI 结果：
+
+- `pytest tests/v2/test_module8_persistence.py -q`：25 passed
+- `pytest tests/v2/`：149 passed
+- `pytest tests/eval/v2/`：34 passed
+- Full suite：305 passed，1 个既有 unrelated failure：
+  `tests/generation/test_generation.py::test_generation_config_reads_env_without_slots_descriptor_bug`
+- 上述失败属于既有 GenerationConfig dotenv environment pollution，本 Module 未修改 Generation
+  code。
+- `uv sync --extra v2-persistence`：PASS
+- `uv lock --check`：PASS
+- `python -m compileall -q src`：PASS
+- `git diff --check`：PASS
+- workspace：clean
+
+以上 local validation 中 full suite 的唯一失败不属于 Module 8 persistence contract。
+
+#### Cross-process Acceptance Record
+
+已使用同一 temporary SQLite file 验证独立 invocation：
+
+`start → waiting_user/resumable=true → status(waiting_user) → resume → completed/complete →
+status(completed)`。
+
+Process A/B/C/D 为独立 Python process invocation；测试环境可能复用 PID namespace，因此只记录
+process isolation，不声称 PID 唯一。
+
+#### Real Smoke Record
+
+Module 8 开发阶段曾尝试真实 V2.3 smoke，但在 Module 2 Router structured output 阶段失败：
+`structured_output_invalid`，`stage=module2_planning`，`role=router`。该失败未进入 durable HITL
+path，不属于 Module 8 persistence failure；未为 smoke 修改 Router/Decomposer prompt。deterministic
+cross-process acceptance 已作为 durable contract 验收，不虚构 real durable HITL 成功记录。
+
+#### Scope Boundary and Freeze Statement
+
+Module 8 不实现 Module 9 final baseline evaluation、V3 calculator、Python execution、SQL Agent、
+dynamic replanning、reflection、unbounded retry、generic Tool Executor、HTTP job infrastructure、
+PostgreSQL/Redis persistence 或 distributed scheduler。
+
+Module 8 is frozen。后续除 regression、explicit contract bug 或 Module 9 evaluation integration
+所需的 documented compatibility fix 外，不得静默改变 V2.3 durable stage semantics、
+checkpoint/metadata separation、`thread_id=request_id`、interrupt/resume boundary、Module 7
+exactly-once resume path、idempotent resume、TTL、state schema compatibility、lease、heartbeat、
+ownership-loss commit protection、stale resume protection、checkpoint-not-found semantics、V2.2
+non-resumable boundary、no-pickle serialization boundary 或 cross-process continuation。
+
 ### Module 9：最终评测与冻结
 
 - 三套数据、四层指标、不可变 reports。
