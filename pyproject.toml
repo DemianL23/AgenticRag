@@ -48,6 +48,7 @@ agenticrag-v2-resume = "agenticrag.v2.cli:resume_main"
 agenticrag-v2-checkpoint-cleanup = "agenticrag.v2.cli:cleanup_main"
 agenticrag-eval-v2-module6 = "eval.v2.module6:main"
 agenticrag-eval-v2-module8 = "eval.v2.module8:main"
+agenticrag-eval-v2-final-baseline = "eval.v2.final_baseline:main"
 agenticrag-ask = "agenticrag.rag.ask:main"
 
 [project.optional-dependencies]
