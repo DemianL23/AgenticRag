@@ -47,6 +47,14 @@ def _write_json(path: Path, payload: dict[str, object]) -> Path:
     return path
 
 
+def _mutate_signed_report(path: Path, **metric_updates: object) -> None:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["metrics"].update(metric_updates)
+    payload["artifact_digest"] = ""
+    payload["artifact_digest"] = _json_digest(payload)
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+
 def _signed_report(
     payload: dict[str, object], *, producer: str, config: V2Config | None = None
 ) -> dict[str, object]:
@@ -86,6 +94,31 @@ def _valid_retrieval_report(path: Path) -> Path:
 
 def _valid_cross_process_report(path: Path, *, git_commit: str) -> Path:
     request_id = "8db660d1-9b3b-4d68-8dca-73b32bd5374e"
+    names = (
+        "start",
+        "status_waiting",
+        "resume",
+        "status_completed",
+        "invalid_payload",
+        "duplicate_resume",
+        "stale_resume",
+        "expired_checkpoint",
+        "lease_recovery",
+    )
+
+    def invocation(name: str, index: int) -> dict[str, object]:
+        return {
+            "name": name,
+            "passed": True,
+            "request_id": request_id,
+            "thread_id": request_id,
+            "invocation_index": index,
+            "command": ["python", "-m", "eval.v2.module8_worker", name],
+            "exit_code": 0,
+            "pid": index,
+            "result": {"contract": name},
+        }
+
     payload: dict[str, object] = {
         "schema_version": 1,
         "producer": "module8_cross_process_acceptance",
@@ -93,20 +126,10 @@ def _valid_cross_process_report(path: Path, *, git_commit: str) -> Path:
         "git_commit": git_commit,
         "request_id": request_id,
         "thread_id": request_id,
-        "steps": [
-            {
-                "name": name,
-                "passed": True,
-                "request_id": request_id,
-                "thread_id": request_id,
-            }
-            for name in ("start", "status_waiting", "resume", "status_completed")
+        "steps": [invocation(name, index) for index, name in enumerate(names[:4], 1)],
+        "negative_contracts": [
+            invocation(name, index) for index, name in enumerate(names[4:], 5)
         ],
-        "duplicate_resume_passed": True,
-        "stale_resume_passed": True,
-        "invalid_payload_passed": True,
-        "expired_checkpoint_passed": True,
-        "lease_recovery_passed": True,
         "artifact_digest": "",
     }
     payload["artifact_digest"] = _json_digest(
@@ -158,7 +181,7 @@ def _valid_evaluator_and_stage_reports(root: Path) -> dict[str, Path]:
                     "route_accuracy",
                     "recovery_strategy_accuracy",
                 )
-            },
+            } | {"invariant_violation_count": 0},
             "evaluation_incomplete": False,
         }, producer="module4_gold_replay_evaluator"),
     )
@@ -179,6 +202,11 @@ def _valid_evaluator_and_stage_reports(root: Path) -> dict[str, Path]:
                 "outcome_accuracy": 0.9,
                 "unsupported_computation_recall": 1.0,
                 "abstention_correctness": 1.0,
+                "schema_invariant_violation_count": 0,
+                "provenance_violation_count": 0,
+                "citation_violation_count": 0,
+                "budget_violation_count": 0,
+                "retrieval_degraded_queries_count": 0,
             },
             "evaluation_incomplete": False,
         }, producer="v2_answer_ragas_evaluator"),
@@ -194,6 +222,10 @@ def _valid_evaluator_and_stage_reports(root: Path) -> dict[str, Path]:
                 "technical_failure_count": 0,
                 "degraded_retrieval_count": 0,
                 "invariant_violation_count": 0,
+                "schema_invariant_violation_count": 0,
+                "provenance_violation_count": 0,
+                "citation_violation_count": 0,
+                "budget_violation_count": 0,
             },
             "evaluation_incomplete": False,
         }, producer="v2_1_stage_evaluator"),
@@ -208,19 +240,35 @@ def _valid_evaluator_and_stage_reports(root: Path) -> dict[str, Path]:
                 "finding_count": 1,
                 "technical_failure_count": 0,
                 "invariant_violation_count": 0,
+                "degraded_retrieval_count": 0,
+                "schema_invariant_violation_count": 0,
+                "provenance_violation_count": 0,
+                "citation_violation_count": 0,
+                "budget_violation_count": 0,
             },
         }, producer="v2_2_stage_evaluator"),
+    )
+    stage_cross = _valid_cross_process_report(
+        root / "stage-cross.json", git_commit=baseline._git_commit() or "0" * 40
     )
     v23 = _write_json(
         root / "v23.json",
         _signed_report({
             "run_id": "v23-run",
             "target_stage": "v2_3",
+            "cross_process_acceptance_ref": str(stage_cross),
+            "cross_process_acceptance_digest": baseline._sha256(stage_cross),
             "metrics": {
                 "interrupt_count": 1,
                 "resume_count": 1,
                 "final_execution_status": "completed",
                 "invariant_violation_count": 0,
+                "technical_failure_count": 0,
+                "degraded_retrieval_count": 0,
+                "schema_invariant_violation_count": 0,
+                "provenance_violation_count": 0,
+                "citation_violation_count": 0,
+                "budget_violation_count": 0,
             },
         }, producer="v2_3_stage_evaluator"),
     )
@@ -231,6 +279,7 @@ def _valid_evaluator_and_stage_reports(root: Path) -> dict[str, Path]:
         "stage_v21_report": v21,
         "stage_v22_report": v22,
         "stage_v23_report": v23,
+        "cross_process_report": stage_cross,
     }
 
 
@@ -440,6 +489,27 @@ def test_missing_cross_process_evidence_makes_candidate_incomplete(tmp_path: Pat
     assert "v2_3_cross_process" in report["failed_gates"]
 
 
+def test_cross_process_evidence_cannot_substitute_for_v23_stage_report(
+    tmp_path: Path,
+) -> None:
+    cross = _valid_cross_process_report(
+        tmp_path / "cross.json", git_commit=baseline._git_commit() or "0" * 40
+    )
+    report = evaluate_baseline(
+        output_root=tmp_path / "out",
+        run_id="cross-is-not-stage",
+        mode="contract",
+        config=V2Config(),
+        cross_process_report=cross,
+    )
+    v23 = next(
+        item for item in report["stage_reports"] if item["target_stage"] == "v2_3"
+    )
+    assert report["hard_gates"]["v2_3_cross_process"] is True
+    assert v23["evaluation_complete"] is False
+    assert report["evaluation_completeness"]["stage_reports_evaluated"] is False
+
+
 def test_report_digest_round_trip_and_immutable_output(tmp_path: Path) -> None:
     retrieval = tmp_path / "retrieval.json"
     retrieval.write_text(
@@ -501,9 +571,6 @@ def test_contract_only_is_never_eligible_even_with_valid_cross_evidence(
         mode="contract",
         config=V2Config(),
         retrieval_report=_valid_retrieval_report(tmp_path / "retrieval.json"),
-        cross_process_report=_valid_cross_process_report(
-            tmp_path / "cross.json", git_commit=commit
-        ),
         **reports,
     )
     assert result["evaluation_profile"] == "development_contract"
@@ -777,12 +844,138 @@ def test_only_full_baseline_profile_can_become_eligible(
         profile="full_baseline",
         config=V2Config(),
         retrieval_report=_valid_retrieval_report(tmp_path / "retrieval.json"),
-        cross_process_report=_valid_cross_process_report(
-            tmp_path / "cross.json", git_commit=commit
-        ),
         **reports,
     )
     assert result["evaluation_completeness"]["complete"] is True
     assert result["evaluation_incomplete"] is False
     assert result["freeze_eligible"] is True
     assert result["baseline_status"] == "eligible"
+
+
+def test_real_nontechnical_terminal_mismatch_blocks_freeze(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    commit = "c" * 40
+    monkeypatch.setattr(baseline, "_git_commit", lambda: commit)
+    monkeypatch.setattr(baseline, "_git_dirty", lambda: False)
+    monkeypatch.setattr(baseline, "_contract_prediction", _passing_scenario_prediction)
+
+    def mismatched_real(scenario: object, config: object) -> dict[str, object]:
+        result = _passing_scenario_prediction(scenario, config)
+        if scenario.scenario_id == "real_v22_complex_zh":
+            result["passed"] = False
+            result["status"] = "completed"
+            result["observed"]["answer_outcome"] = "partial"
+            result["violations"] = ["answer_outcome mismatch"]
+        return result
+
+    monkeypatch.setattr(baseline, "_real_prediction", mismatched_real)
+    reports = _valid_evaluator_and_stage_reports(tmp_path)
+    result = evaluate_baseline(
+        output_root=tmp_path / "out",
+        run_id="real-terminal-mismatch",
+        profile="full_baseline",
+        config=V2Config(),
+        retrieval_report=_valid_retrieval_report(tmp_path / "retrieval.json"),
+        **reports,
+    )
+    assert result["metrics"]["technical_failure_count"] == 0
+    assert result["hard_gates"][
+        "ordinary_baseline_zero_unexpected_technical_failures"
+    ] is True
+    assert result["hard_gates"][
+        "required_real_model_scenarios_terminal_contract"
+    ] is False
+    assert result["freeze_eligible"] is False
+
+
+def test_answer_computation_recall_is_a_hard_gate(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    commit = "c" * 40
+    monkeypatch.setattr(baseline, "_git_commit", lambda: commit)
+    monkeypatch.setattr(baseline, "_git_dirty", lambda: False)
+    monkeypatch.setattr(baseline, "_contract_prediction", _passing_scenario_prediction)
+    monkeypatch.setattr(baseline, "_real_prediction", _passing_scenario_prediction)
+    reports = _valid_evaluator_and_stage_reports(tmp_path)
+    _mutate_signed_report(
+        reports["answer_ragas_report"], unsupported_computation_recall=0.5
+    )
+    result = evaluate_baseline(
+        output_root=tmp_path / "out",
+        run_id="computation-recall",
+        profile="full_baseline",
+        config=V2Config(),
+        retrieval_report=_valid_retrieval_report(tmp_path / "retrieval.json"),
+        **reports,
+    )
+    assert result["hard_gates"]["computation_capability_safety"] is False
+    assert result["freeze_eligible"] is False
+
+
+@pytest.mark.parametrize(
+    ("metric", "gate"),
+    [
+        ("retrieval_degraded_queries_count", "retrieval_degraded_queries_zero"),
+        ("citation_violation_count", "citation_violation_zero"),
+        ("provenance_violation_count", "provenance_violation_zero"),
+    ],
+)
+def test_answer_audit_counts_feed_global_hard_gates(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    metric: str,
+    gate: str,
+) -> None:
+    commit = "c" * 40
+    monkeypatch.setattr(baseline, "_git_commit", lambda: commit)
+    monkeypatch.setattr(baseline, "_git_dirty", lambda: False)
+    monkeypatch.setattr(baseline, "_contract_prediction", _passing_scenario_prediction)
+    monkeypatch.setattr(baseline, "_real_prediction", _passing_scenario_prediction)
+    reports = _valid_evaluator_and_stage_reports(tmp_path)
+    _mutate_signed_report(reports["answer_ragas_report"], **{metric: 1})
+    result = evaluate_baseline(
+        output_root=tmp_path / "out",
+        run_id=f"answer-audit-{metric}",
+        profile="full_baseline",
+        config=V2Config(),
+        retrieval_report=_valid_retrieval_report(tmp_path / "retrieval.json"),
+        **reports,
+    )
+    assert result["hard_gates"][gate] is False
+    assert result["freeze_eligible"] is False
+
+
+def test_module4_invariant_violation_feeds_schema_gate(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(baseline, "_git_dirty", lambda: False)
+    reports = _valid_evaluator_and_stage_reports(tmp_path)
+    _mutate_signed_report(reports["module4_gold_report"], invariant_violation_count=1)
+    result = evaluate_baseline(
+        output_root=tmp_path / "out",
+        run_id="module4-invariant",
+        mode="contract",
+        config=V2Config(),
+        **reports,
+    )
+    assert result["invariant_counts"]["schema_invariant_violation_count"] >= 1
+    assert result["hard_gates"]["schema_invariant_zero"] is False
+
+
+@pytest.mark.parametrize("stage_key", ["stage_v22_report", "stage_v23_report"])
+def test_stage_degraded_retrieval_feeds_global_gate(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, stage_key: str
+) -> None:
+    monkeypatch.setattr(baseline, "_git_dirty", lambda: False)
+    reports = _valid_evaluator_and_stage_reports(tmp_path)
+    _mutate_signed_report(reports[stage_key], degraded_retrieval_count=1)
+    result = evaluate_baseline(
+        output_root=tmp_path / "out",
+        run_id=f"stage-degraded-{stage_key}",
+        mode="contract",
+        config=V2Config(),
+        **reports,
+    )
+    assert result["invariant_counts"]["retrieval_degraded_queries_count"] >= 1
+    assert result["hard_gates"]["retrieval_degraded_queries_zero"] is False

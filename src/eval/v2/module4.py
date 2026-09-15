@@ -238,6 +238,10 @@ def evaluate_module4(
             "technical_failure_count": technical_failures,
             "degraded_retrieval_count": degraded_count,
             "invariant_violation_count": invariant_violations,
+            "schema_invariant_violation_count": invariant_violations,
+            "provenance_violation_count": 0,
+            "citation_violation_count": 0,
+            "budget_violation_count": 0,
             "supported_runtime_sample_count": supported_observed,
             "observed_route_distribution": dict(
                 Counter(

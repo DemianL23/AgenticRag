@@ -35,7 +35,9 @@ from agenticrag.v2.types import (
     TargetStage,
     TaskCapability,
 )
+from .audit import AuditCounts, audit_v2_result
 from .contract_harness import run_contract_scenario
+from .module8 import CrossProcessEvidence
 from .planning import load_planning_samples
 from eval.retrieval_runner import load_retrieval_dataset
 
@@ -191,6 +193,11 @@ class StageReportReference(V2Model):
     digest: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     available: bool = False
     evaluation_complete: bool = False
+    audit_counts: InvariantCounts = Field(default_factory=InvariantCounts)
+    cross_process_acceptance_ref: str | None = None
+    cross_process_acceptance_digest: str | None = Field(
+        default=None, pattern=r"^[0-9a-f]{64}$"
+    )
     error: str | None = None
 
 
@@ -201,6 +208,7 @@ class EvaluatorReportReference(V2Model):
     digest: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     available: bool = False
     evaluation_complete: bool = False
+    audit_counts: InvariantCounts = Field(default_factory=InvariantCounts)
     error: str | None = None
 
 
@@ -252,30 +260,6 @@ class EvaluationCompleteness(V2Model):
         if self.complete and self.missing_components:
             raise ValueError("complete evaluation cannot list missing components")
         return self
-
-
-class CrossProcessStep(V2Model):
-    name: str
-    passed: bool
-    request_id: str
-    thread_id: str
-    pid: int | None = None
-
-
-class CrossProcessEvidence(V2Model):
-    schema_version: Literal[1]
-    producer: Literal["module8_cross_process_acceptance"]
-    run_id: str
-    git_commit: str = Field(pattern=r"^[0-9a-f]{40}$")
-    request_id: str
-    thread_id: str
-    steps: list[CrossProcessStep] = Field(min_length=4)
-    duplicate_resume_passed: bool
-    stale_resume_passed: bool
-    invalid_payload_passed: bool
-    expired_checkpoint_passed: bool
-    lease_recovery_passed: bool
-    artifact_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
 
 
 class BaselineCandidateReport(V2Model):
@@ -758,76 +742,36 @@ def _compare_expected(
 
 
 def _audit_tasks(tasks: list[Any], evidence: dict[str, Any], stage: Any, *, config: V2Config, state: dict[str, Any] | None = None) -> tuple[dict[str, Any], InvariantCounts]:
-    schema = provenance = citation = budget = degraded = 0
-    finding_ids: set[str] = set()
-    evidence_ids = set(evidence)
-    if len(tasks) > config.budgets.max_subqueries:
-        budget += 1
-    for task in tasks:
-        if task.execution_status == "failed" and task.answer_outcome is not None:
-            schema += 1
-        if len(task.query_revisions) > config.budgets.max_query_revisions or any(
-            len(revision.retrieval_attempts)
-            > config.budgets.max_retrieval_attempts_per_revision
-            for revision in task.query_revisions
-        ):
-            budget += 1
-        if any(
-            revision.ordinal > config.budgets.max_query_revisions
-            or any(
-                attempt.ordinal
-                > config.budgets.max_retrieval_attempts_per_revision
-                for attempt in revision.retrieval_attempts
+    audit = audit_v2_result(tasks, evidence, stage, config=config, state=state)
+    task_failures = sum(
+        getattr(task, "execution_status", None) == "failed" for task in tasks
+    )
+    request_failure = int(
+        stage.execution_status == "failed" and task_failures == 0
+    )
+    observed = {
+        "execution_status": stage.execution_status,
+        "answer_outcome": stage.answer_outcome,
+        "route": next(
+            (
+                task.routing_decisions[-1].route
+                for task in reversed(tasks)
+                if getattr(task, "routing_decisions", None)
+            ),
+            None,
+        ),
+        "route_counts": dict(
+            Counter(
+                decision.route
+                for task in tasks
+                for decision in getattr(task, "routing_decisions", [])
             )
-            for revision in task.query_revisions
-        ):
-            budget += 1
-        for revision in task.query_revisions:
-            degraded += sum(int(attempt.retrieval_degraded) for attempt in revision.retrieval_attempts)
-        if task.grounded_finding is not None:
-            finding = task.grounded_finding
-            finding_ids.update(finding.evidence_ids)
-            support = set(task.grade_records[-1].grade.supporting_evidence_ids) if task.grade_records else set()
-            latest_revision = task.query_revisions[-1].id if task.query_revisions else None
-            latest_grade_revision = task.grade_records[-1].query_revision_id if task.grade_records else None
-            latest_grade = task.grade_records[-1] if task.grade_records else None
-            current_attempt_ids = {
-                attempt.id
-                for attempt in (task.query_revisions[-1].retrieval_attempts if task.query_revisions else [])
-            }
-            attempt_evidence = {
-                attempt.id: set(attempt.evidence_ids)
-                for attempt in (task.query_revisions[-1].retrieval_attempts if task.query_revisions else [])
-            }
-            grade_input_valid = bool(
-                latest_grade
-                and set(latest_grade.input_attempt_ids) <= current_attempt_ids
-                and set(finding.evidence_ids) <= set(latest_grade.input_evidence_ids)
-            )
-            occurrence_valid = all(
-                any(
-                    occurrence.task_id == task.id
-                    and occurrence.query_revision_id == latest_revision
-                    and occurrence.retrieval_attempt_id in current_attempt_ids
-                    and evidence_id
-                    in attempt_evidence.get(occurrence.retrieval_attempt_id, set())
-                    for occurrence in evidence[evidence_id].occurrences
-                )
-                and evidence[evidence_id].evidence_id == evidence[evidence_id].chunk_id
-                for evidence_id in finding.evidence_ids
-                if evidence_id in evidence
-            )
-            if finding.task_id != task.id or not finding.evidence_ids or len(finding.evidence_ids) > config.budgets.max_evidence_per_finding or not set(finding.evidence_ids) <= evidence_ids or not set(finding.evidence_ids) <= support or latest_revision != latest_grade_revision or not grade_input_valid or not occurrence_valid:
-                provenance += 1
-    if state is not None and state.get("hitl_rounds", 0) > config.budgets.max_hitl_rounds:
-        budget += 1
-    pending = getattr(stage, "pending_hitl_request", None)
-    if pending is not None and any(len(item.scope_options) > config.budgets.max_scope_options for item in pending.items):
-        budget += 1
-    final = stage.final_answer
-    if final is not None and not set(final.citation_evidence_ids) <= finding_ids:
-        citation += 1
-    return {"execution_status": stage.execution_status, "answer_outcome": stage.answer_outcome, "route": next((task.routing_decisions[-1].route for task in reversed(tasks) if task.routing_decisions), None), "route_counts": dict(Counter(decision.route for task in tasks for decision in task.routing_decisions)), "technical_failure_count": sum(task.execution_status == "failed" for task in tasks) + int(stage.execution_status == "failed" and not any(task.execution_status == "failed" for task in tasks)), "degraded_retrieval_count": degraded, "schema_invariant_violation_count": schema, "provenance_violation_count": provenance, "citation_violation_count": citation, "budget_violation_count": budget}, InvariantCounts(schema_invariant_violation_count=schema, provenance_violation_count=provenance, citation_violation_count=citation, budget_violation_count=budget, retrieval_degraded_queries_count=degraded)
+        ),
+        "technical_failure_count": task_failures + request_failure,
+        "degraded_retrieval_count": audit.retrieval_degraded_queries_count,
+        **audit.model_dump(mode="json"),
+    }
+    return observed, InvariantCounts.model_validate(audit.model_dump())
 
 
 def _build_report(
@@ -847,34 +791,31 @@ def _build_report(
     cross_process_report: Path | None,
 ) -> dict[str, Any]:
     dataset_records = _all_dataset_records(dataset_path)
-    counts = InvariantCounts(
-        schema_invariant_violation_count=sum(item.get("observed", {}).get("schema_invariant_violation_count", 0) for item in predictions),
-        provenance_violation_count=sum(item.get("observed", {}).get("provenance_violation_count", 0) for item in predictions),
-        citation_violation_count=sum(item.get("observed", {}).get("citation_violation_count", 0) for item in predictions),
-        budget_violation_count=sum(item.get("observed", {}).get("budget_violation_count", 0) for item in predictions),
-        retrieval_degraded_queries_count=sum(item.get("observed", {}).get("degraded_retrieval_count", 0) for item in predictions),
+    scenario_by_id = {record.scenario_id: record for record in selected}
+    ordinary_predictions = [
+        item
+        for item in predictions
+        if not scenario_by_id[item["scenario_id"]].expected.technical_failure
+    ]
+    workflow_counts = InvariantCounts(
+        schema_invariant_violation_count=sum(item.get("observed", {}).get("schema_invariant_violation_count", 0) for item in ordinary_predictions),
+        provenance_violation_count=sum(item.get("observed", {}).get("provenance_violation_count", 0) for item in ordinary_predictions),
+        citation_violation_count=sum(item.get("observed", {}).get("citation_violation_count", 0) for item in ordinary_predictions),
+        budget_violation_count=sum(item.get("observed", {}).get("budget_violation_count", 0) for item in ordinary_predictions),
+        retrieval_degraded_queries_count=sum(item.get("observed", {}).get("degraded_retrieval_count", 0) for item in ordinary_predictions),
+    )
+    counts = _sum_invariant_counts(
+        [
+            workflow_counts,
+            *(item.audit_counts for item in evaluator_reports),
+            *(item.audit_counts for item in stage_refs),
+        ]
     )
     v1 = _check_retrieval_gate(retrieval_report)
     current_commit = _git_commit()
     cross = _check_cross_process_gate(
         cross_process_report, current_git_commit=current_commit
     )
-    if cross["passed"]:
-        stage_refs = [
-            (
-                StageReportReference(
-                    target_stage="v2_3",
-                    run_id=cross.get("run_id"),
-                    path=cross.get("path"),
-                    digest=cross.get("sha256"),
-                    available=True,
-                    evaluation_complete=True,
-                )
-                if item.target_stage == "v2_3" and not item.evaluation_complete
-                else item
-            )
-            for item in stage_refs
-        ]
     dataset_gate = all(record.available for record in dataset_records)
     integrity = _check_frozen_dataset_integrity(dataset_records)
     contract_ids = {record.scenario_id for record in records if record.mode == "contract"}
@@ -883,7 +824,13 @@ def _build_report(
     workflow_evaluated = contract_ids <= selected_ids
     real_evaluated = real_ids <= selected_ids and bool(real_ids)
     evaluator_by_name = {item.evaluator: item for item in evaluator_reports}
-    stage_evaluated = all(item.evaluation_complete for item in stage_refs)
+    v23_stage = next(item for item in stage_refs if item.target_stage == "v2_3")
+    v23_cross_linked = bool(
+        cross["passed"]
+        and v23_stage.cross_process_acceptance_ref == cross.get("path")
+        and v23_stage.cross_process_acceptance_digest == cross.get("sha256")
+    )
+    stage_evaluated = all(item.evaluation_complete for item in stage_refs) and v23_cross_linked
     component_values = {
         "retrieval_regression": bool(v1["evaluated"]),
         "planning_evaluator": evaluator_by_name["planning"].evaluation_complete,
@@ -932,6 +879,22 @@ def _build_report(
         item.get("expected_capability")
         for item in predictions
     }
+    answer_computation_recall = evaluator_metrics["answer"].get(
+        "unsupported_computation_recall"
+    )
+    computation_evaluated = (
+        computation_evaluated and answer_computation_recall is not None
+    )
+    contract_terminal_passed = workflow_evaluated and all(
+        item.get("passed") is True
+        for item in predictions
+        if item.get("mode") == "contract"
+    )
+    real_terminal_passed = real_evaluated and all(
+        item.get("passed") is True
+        for item in predictions
+        if item.get("mode") == "real"
+    )
     gate_checks: dict[str, tuple[bool, bool]] = {
         "dataset_schema_and_coverage": (dataset_gate, True),
         "frozen_dataset_integrity": (integrity["passed"], True),
@@ -957,17 +920,17 @@ def _build_report(
             workflow_evaluated,
         ),
         "computation_capability_safety": (
-            _computation_gate(predictions),
+            _computation_gate(predictions)
+            and answer_computation_recall == 1.0,
             computation_evaluated,
         ),
         "baseline_scenarios_terminal_contract": (
-            workflow_evaluated
-            and all(
-                item.get("passed") is True
-                for item in predictions
-                if item.get("mode") == "contract"
-            ),
+            contract_terminal_passed,
             workflow_evaluated,
+        ),
+        "required_real_model_scenarios_terminal_contract": (
+            real_terminal_passed,
+            real_evaluated,
         ),
         "v2_3_cross_process": (cross["passed"], cross["evaluated"]),
         "ordinary_baseline_zero_unexpected_technical_failures": (
@@ -1011,6 +974,13 @@ def _build_report(
         digests={"dataset_sha256": _sha256(dataset_path), "workflow_scenarios_sha256": _sha256(dataset_path), "resolved_config_sha256": _json_digest(config.resolved_record()), "predictions_sha256": _sha256(predictions_path), "retrieval_eval_v2_sha256": _digest_if_exists(RETRIEVAL_DATASET), "qa_sha256": _digest_if_exists(QA_DATASET), "v2_qa_annotations_sha256": _digest_if_exists(ANNOTATION_DATASET), "module4_gold_sha256": _digest_if_exists(MODULE4_GOLD_DATASET), "artifact_manifest_sha256": _json_digest({"dataset_sha256": _sha256(dataset_path), "resolved_config_sha256": _json_digest(config.resolved_record()), "predictions_sha256": _sha256(predictions_path)})},
     )
     return report.model_copy(update={"artifact_digest": _report_digest(report)}).model_dump(mode="json")
+
+
+def _sum_invariant_counts(items: list[InvariantCounts]) -> InvariantCounts:
+    totals = AuditCounts()
+    for item in items:
+        totals = totals + AuditCounts.model_validate(item.model_dump())
+    return InvariantCounts.model_validate(totals.model_dump())
 
 
 def _metrics(
@@ -1124,6 +1094,24 @@ def _load_stage_report(
         metrics = payload.get("metrics")
         if not isinstance(metrics, dict):
             raise ValueError("stage report metrics must be an object")
+        required_audit_fields = {
+            "technical_failure_count",
+            "degraded_retrieval_count",
+            "invariant_violation_count",
+            "schema_invariant_violation_count",
+            "provenance_violation_count",
+            "citation_violation_count",
+            "budget_violation_count",
+        }
+        if not required_audit_fields <= set(metrics):
+            raise ValueError("stage report is missing required audit metrics")
+        audit = _audit_counts_from_metrics(metrics)
+        audit_clear = not any(audit.model_dump().values())
+        runtime_clear = (
+            metrics["technical_failure_count"] == 0
+            and metrics["degraded_retrieval_count"] == 0
+            and metrics["invariant_violation_count"] == 0
+        )
         declared_stage = payload.get("target_stage")
         if target_stage == "v2_1":
             stage_ok = declared_stage == "v2_1" and {
@@ -1131,9 +1119,8 @@ def _load_stage_report(
                 "grader_completed_count",
             } <= set(metrics)
             complete = (
-                metrics.get("technical_failure_count") == 0
-                and metrics.get("degraded_retrieval_count") == 0
-                and metrics.get("invariant_violation_count") == 0
+                runtime_clear
+                and audit_clear
             )
         elif target_stage == "v2_2":
             stage_ok = declared_stage == "v2_2" and {
@@ -1141,8 +1128,8 @@ def _load_stage_report(
                 "finding_count",
             } <= set(metrics)
             complete = (
-                metrics.get("technical_failure_count") == 0
-                and metrics.get("invariant_violation_count") == 0
+                runtime_clear
+                and audit_clear
             )
         else:
             stage_ok = declared_stage == "v2_3" and {
@@ -1150,11 +1137,22 @@ def _load_stage_report(
                 "resume_count",
                 "final_execution_status",
             } <= set(metrics)
+            cross_ref = payload.get("cross_process_acceptance_ref")
+            cross_digest = payload.get("cross_process_acceptance_digest")
+            cross_path = Path(cross_ref) if isinstance(cross_ref, str) else None
+            cross_link_ok = bool(
+                cross_path
+                and cross_path.is_file()
+                and isinstance(cross_digest, str)
+                and _sha256(cross_path) == cross_digest
+            )
             complete = (
                 int(metrics.get("interrupt_count", 0)) >= 1
                 and int(metrics.get("resume_count", 0)) >= 1
                 and metrics.get("final_execution_status") == "completed"
-                and metrics.get("invariant_violation_count") == 0
+                and runtime_clear
+                and audit_clear
+                and cross_link_ok
             )
         if not stage_ok:
             raise ValueError(f"artifact is not a real {target_stage} stage evaluator report")
@@ -1165,6 +1163,13 @@ def _load_stage_report(
             digest=_sha256(path),
             available=True,
             evaluation_complete=bool(complete),
+            audit_counts=audit,
+            cross_process_acceptance_ref=(
+                str(cross_path) if target_stage == "v2_3" and cross_path else None
+            ),
+            cross_process_acceptance_digest=(
+                cross_digest if target_stage == "v2_3" else None
+            ),
             error=None if complete else "stage evaluator reports incomplete execution",
         )
     except Exception as exc:
@@ -1265,6 +1270,28 @@ def _missing_evaluator(
     )
 
 
+def _audit_counts_from_metrics(metrics: dict[str, Any]) -> InvariantCounts:
+    return InvariantCounts(
+        schema_invariant_violation_count=int(
+            metrics.get(
+                "schema_invariant_violation_count",
+                metrics.get("invariant_violation_count", 0),
+            )
+        ),
+        provenance_violation_count=int(
+            metrics.get("provenance_violation_count", 0)
+        ),
+        citation_violation_count=int(metrics.get("citation_violation_count", 0)),
+        budget_violation_count=int(metrics.get("budget_violation_count", 0)),
+        retrieval_degraded_queries_count=int(
+            metrics.get(
+                "retrieval_degraded_queries_count",
+                metrics.get("degraded_retrieval_count", 0),
+            )
+        ),
+    )
+
+
 def _validate_external_report(
     payload: dict[str, Any],
     envelope: ExternalReportEnvelope,
@@ -1330,6 +1357,14 @@ def _load_planning_report(
             ),
             "structural_violation_counts": structural,
         }
+        audit = InvariantCounts(
+            schema_invariant_violation_count=int(
+                structural.get(
+                    "schema_invariant_violations",
+                    sum(int(value) for value in structural.values()),
+                )
+            )
+        )
         complete = (
             payload.get("evaluation_incomplete") is False
             and dataset.get("qa_sha256") == _digest_if_exists(QA_DATASET)
@@ -1343,6 +1378,7 @@ def _load_planning_report(
             digest=_sha256(path),
             available=True,
             evaluation_complete=complete,
+            audit_counts=audit,
             error=None if complete else "planning evaluation incomplete or dataset identity mismatch",
         ), values
     except Exception as exc:
@@ -1381,10 +1417,18 @@ def _load_module4_report(
         )
         metrics = payload["metrics"]
         values = {field: metrics.get(field) for field in fields}
+        if "invariant_violation_count" not in metrics:
+            raise ValueError("Module 4 Gold report is missing invariant_violation_count")
+        audit = InvariantCounts(
+            schema_invariant_violation_count=int(
+                metrics["invariant_violation_count"]
+            )
+        )
         complete = (
             payload.get("dataset", {}).get("sha256") == FROZEN_MODULE4_GOLD_SHA256
             and payload.get("evaluation_incomplete") is False
             and all(value is not None for value in values.values())
+            and audit.schema_invariant_violation_count == 0
         )
         return EvaluatorReportReference(
             evaluator="module4_grade_route",
@@ -1393,6 +1437,7 @@ def _load_module4_report(
             digest=_sha256(path),
             available=True,
             evaluation_complete=complete,
+            audit_counts=audit,
             error=None if complete else "Module 4 Gold evaluation incomplete or dataset identity mismatch",
         ), values
     except Exception as exc:
@@ -1426,6 +1471,16 @@ def _load_answer_report(
         )
         dataset = payload["dataset"]
         metrics = payload["metrics"]
+        required_audit_fields = {
+            "schema_invariant_violation_count",
+            "provenance_violation_count",
+            "citation_violation_count",
+            "budget_violation_count",
+            "retrieval_degraded_queries_count",
+        }
+        if not required_audit_fields <= set(metrics):
+            raise ValueError("answer report is missing required audit metrics")
+        audit = _audit_counts_from_metrics(metrics)
         ragas = metrics.get("supported_subset_ragas")
         complete = (
             dataset.get("qa_sha256") == _digest_if_exists(QA_DATASET)
@@ -1445,6 +1500,7 @@ def _load_answer_report(
             digest=_sha256(path),
             available=True,
             evaluation_complete=complete,
+            audit_counts=audit,
             error=None if complete else "answer/RAGAS evaluation incomplete or dataset mismatch",
         ), {
             "supported_subset_ragas": ragas,
@@ -1529,14 +1585,31 @@ def _check_cross_process_gate(
             {key: value for key, value in payload.items() if key != "artifact_digest"}
         )
         names = [step.name for step in evidence.steps]
-        ids_ok = all(step.request_id == evidence.request_id and step.thread_id == evidence.thread_id for step in evidence.steps)
-        negative_ok = all((evidence.duplicate_resume_passed, evidence.stale_resume_passed, evidence.invalid_payload_passed, evidence.expired_checkpoint_passed, evidence.lease_recovery_passed))
+        negative_names = [item.name for item in evidence.negative_contracts]
+        invocations = [*evidence.steps, *evidence.negative_contracts]
+        ids_ok = all(
+            step.request_id == evidence.request_id
+            and step.thread_id == evidence.thread_id
+            for step in evidence.steps
+        )
+        process_evidence_ok = (
+            sorted(item.invocation_index for item in invocations)
+            == list(range(1, len(invocations) + 1))
+            and all(item.command and item.exit_code == 0 for item in invocations)
+        )
+        negative_ok = negative_names == [
+            "invalid_payload",
+            "duplicate_resume",
+            "stale_resume",
+            "expired_checkpoint",
+            "lease_recovery",
+        ] and all(item.passed for item in evidence.negative_contracts)
         allowed_commits = {MODULE8_FROZEN_IMPLEMENTATION_SHA}
         if current_git_commit is not None:
             allowed_commits.add(current_git_commit)
         commit_ok = evidence.git_commit in allowed_commits
-        passed = digest_ok and names == ["start", "status_waiting", "resume", "status_completed"] and ids_ok and evidence.request_id == evidence.thread_id and negative_ok and commit_ok and all(step.passed for step in evidence.steps)
-        return {"passed": passed, "evaluated": True, "status": "checked", "path": str(path), "sha256": _sha256(path), "run_id": evidence.run_id, "digest_valid": digest_ok, "git_commit_allowed": commit_ok, "allowed_git_commits": sorted(allowed_commits), "request_id": evidence.request_id, "thread_id": evidence.thread_id, "step_count": len(evidence.steps), "negative_contracts": negative_ok}
+        passed = digest_ok and names == ["start", "status_waiting", "resume", "status_completed"] and ids_ok and evidence.request_id == evidence.thread_id and negative_ok and process_evidence_ok and commit_ok and all(step.passed for step in evidence.steps)
+        return {"passed": passed, "evaluated": True, "status": "checked", "path": str(path), "sha256": _sha256(path), "run_id": evidence.run_id, "digest_valid": digest_ok, "git_commit_allowed": commit_ok, "allowed_git_commits": sorted(allowed_commits), "request_id": evidence.request_id, "thread_id": evidence.thread_id, "step_count": len(evidence.steps), "negative_contracts": negative_ok, "process_invocation_evidence": process_evidence_ok}
     except Exception as exc:
         return {"passed": False, "evaluated": False, "status": "invalid", "path": str(path), "error": _safe_error(exc)}
 

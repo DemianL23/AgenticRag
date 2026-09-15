@@ -14,6 +14,8 @@ from uuid import uuid4
 from agenticrag.v2.config import V2Config
 from agenticrag.v2.module6 import Module6Service
 
+from .audit import audit_v2_result
+
 
 DEFAULT_OUTPUT_ROOT = Path("artifacts/eval/v2/module6_v2_2")
 
@@ -35,6 +37,9 @@ def evaluate_module6(
     service = service or Module6Service(config)
     result = service.run(question, response_language=response_language)
     violations = check_module6_invariants(result)
+    audit = audit_v2_result(
+        list(result.tasks), result.evidence, result.stage_result, config=config
+    )
     tasks = list(result.tasks)
     routes = Counter(
         task.routing_decisions[-1].route
@@ -82,7 +87,15 @@ def evaluate_module6(
                 for revision in task.query_revisions
                 for attempt in revision.retrieval_attempts
             ),
-            "invariant_violation_count": len(violations),
+            "invariant_violation_count": max(
+                len(violations), audit.schema_invariant_violation_count
+            ),
+            "schema_invariant_violation_count": max(
+                len(violations), audit.schema_invariant_violation_count
+            ),
+            "provenance_violation_count": audit.provenance_violation_count,
+            "citation_violation_count": audit.citation_violation_count,
+            "budget_violation_count": audit.budget_violation_count,
         },
         "invariant_violations": violations,
         "artifact_digest": "",

@@ -4,8 +4,6 @@ from .answer_baseline import evaluate_v2_answers, write_answer_report
 
 from .final_baseline import (
     BaselineCandidateReport,
-    CrossProcessEvidence,
-    CrossProcessStep,
     DatasetRecord,
     EvaluationCompleteness,
     EvaluatorReportReference,
@@ -19,6 +17,11 @@ from .final_baseline import (
     evaluate_baseline,
     load_workflow_scenarios,
     scenario_coverage,
+)
+from .module8 import (
+    CrossProcessEvidence,
+    CrossProcessInvocation,
+    evaluate_module8_cross_process_acceptance,
 )
 
 from .planning import (
@@ -53,7 +56,8 @@ __all__ = [
     "StageReportReference",
     "BaselineCandidateReport",
     "CrossProcessEvidence",
-    "CrossProcessStep",
+    "CrossProcessInvocation",
+    "evaluate_module8_cross_process_acceptance",
     "evaluate_baseline",
     "load_workflow_scenarios",
     "scenario_coverage",

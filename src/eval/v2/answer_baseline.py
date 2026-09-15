@@ -23,6 +23,7 @@ from eval.ragas.dataset import gold_to_reference
 from eval.ragas.providers import create_ragas_evaluator
 from eval.ragas.report import SampleReport, aggregate_scores
 
+from .audit import AuditCounts, audit_v2_result
 from .planning import DEFAULT_ANNOTATION_PATH, DEFAULT_QA_PATH, load_planning_samples
 
 
@@ -50,6 +51,7 @@ async def evaluate_v2_answers(
     per_sample: list[dict[str, Any]] = []
     outcome_correct = unsupported_correct = abstention_correct = 0
     unsupported_total = abstention_total = 0
+    audit_totals = AuditCounts()
 
     for sample in samples:
         annotation = sample.annotation
@@ -63,6 +65,14 @@ async def evaluate_v2_answers(
         }
         try:
             result = service.run(sample.question)
+            audit = audit_v2_result(
+                list(result.tasks),
+                result.evidence,
+                result.stage_result,
+                config=config,
+            )
+            audit_totals = audit_totals + audit
+            item["audit_counts"] = audit.model_dump(mode="json")
             actual_outcome = result.stage_result.answer_outcome
             capabilities = [task.capability for task in result.tasks]
             item["actual_outcome"] = actual_outcome
@@ -160,6 +170,7 @@ async def evaluate_v2_answers(
                 abstention_correct / abstention_total if abstention_total else None
             ),
             "technical_failure_count": sum(item["error"] is not None for item in per_sample),
+            **audit_totals.model_dump(mode="json"),
         },
         "evaluation_incomplete": any(item["error"] is not None for item in per_sample),
         "per_sample": per_sample,

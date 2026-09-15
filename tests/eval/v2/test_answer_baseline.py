@@ -6,13 +6,67 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from agenticrag.v2.config import V2Config
-from agenticrag.v2.schemas import Evidence, StageRunResult, SynthesizedAnswer
+from agenticrag.v2.schemas import (
+    Evidence,
+    EvidenceGrade,
+    EvidenceOccurrence,
+    GradeRecord,
+    GroundedFinding,
+    QueryRevision,
+    RetrievalAttempt,
+    RetrievalTask,
+    StageRunResult,
+    SynthesizedAnswer,
+)
 from eval.v2.answer_baseline import evaluate_v2_answers
 
 
 class _Service:
     def run(self, question: str):
         if question == "supported":
+            attempt = RetrievalAttempt(
+                id="ATT_SQ001_QR001_001",
+                ordinal=1,
+                strategy="original",
+                retrieval_query="supported",
+                evidence_ids=["E1"],
+            )
+            revision = QueryRevision(
+                id="QR_SQ001_001",
+                ordinal=1,
+                source="original",
+                query="supported",
+                retrieval_attempts=[attempt],
+            )
+            grade = GradeRecord(
+                id="GR_SQ001_001",
+                query_revision_id=revision.id,
+                input_attempt_ids=[attempt.id],
+                input_evidence_ids=["E1"],
+                grade=EvidenceGrade(
+                    relevance="strong",
+                    answerability="sufficient",
+                    ambiguity="none",
+                    recoverability="none",
+                    failure_reason="none",
+                    reason="supported",
+                    supporting_evidence_ids=["E1"],
+                ),
+            )
+            task = RetrievalTask(
+                id="SQ_001",
+                ordinal=1,
+                query="supported",
+                intent="answer",
+                capability="retrieval_synthesis",
+                query_revisions=[revision],
+                grade_records=[grade],
+                grounded_finding=GroundedFinding(
+                    task_id="SQ_001", text="supported answer", evidence_ids=["E1"]
+                ),
+                execution_status="completed",
+                answer_outcome="complete",
+            )
             final = SynthesizedAnswer(
                 answer="supported answer", citation_evidence_ids=["E1"], limitations=[]
             )
@@ -24,7 +78,7 @@ class _Service:
                     answer_outcome="complete",
                     final_answer=final,
                 ),
-                tasks=[SimpleNamespace(capability="retrieval_synthesis")],
+                tasks=[task],
                 evidence={
                     "E1": Evidence(
                         evidence_id="E1",
@@ -33,6 +87,15 @@ class _Service:
                         doc_id="d",
                         source="s",
                         page=1,
+                        occurrences=[
+                            EvidenceOccurrence(
+                                task_id=task.id,
+                                query_revision_id=revision.id,
+                                retrieval_attempt_id=attempt.id,
+                                strategy="original",
+                                final_rank=1,
+                            )
+                        ],
                     )
                 },
             )
@@ -46,7 +109,17 @@ class _Service:
                     answer="unsupported", citation_evidence_ids=[], limitations=[]
                 ),
             ),
-            tasks=[SimpleNamespace(capability="arithmetic")],
+            tasks=[
+                RetrievalTask(
+                    id="SQ_001",
+                    ordinal=1,
+                    query="compute",
+                    intent="calculate",
+                    capability="arithmetic",
+                    execution_status="completed",
+                    answer_outcome="unsupported",
+                )
+            ],
             evidence={},
         )
 
@@ -113,4 +186,9 @@ def test_v2_answer_evaluator_scores_supported_ragas_and_outcomes(
     assert report["metrics"]["outcome_accuracy"] == 1.0
     assert report["metrics"]["unsupported_computation_recall"] == 1.0
     assert report["metrics"]["abstention_correctness"] == 1.0
+    assert report["metrics"]["schema_invariant_violation_count"] == 0
+    assert report["metrics"]["provenance_violation_count"] == 0
+    assert report["metrics"]["citation_violation_count"] == 0
+    assert report["metrics"]["budget_violation_count"] == 0
+    assert report["metrics"]["retrieval_degraded_queries_count"] == 0
     assert report["evaluation_incomplete"] is False
