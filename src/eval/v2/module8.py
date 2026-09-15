@@ -29,6 +29,14 @@ from .audit import audit_v2_result
 DEFAULT_OUTPUT_ROOT = Path("artifacts/eval/v2/module8_v2_3")
 
 
+class InvocationTelemetry(V2Model):
+    retrieval_calls: int = Field(default=0, ge=0)
+    grader_calls: int = Field(default=0, ge=0)
+    finding_calls: int = Field(default=0, ge=0)
+    synthesis_calls: int = Field(default=0, ge=0)
+    hitl_calls: int = Field(default=0, ge=0)
+
+
 class CrossProcessInvocation(V2Model):
     name: str
     passed: bool
@@ -38,7 +46,22 @@ class CrossProcessInvocation(V2Model):
     command: list[str] = Field(min_length=1)
     exit_code: int
     pid: int | None = None
+    business_state_before_digest: str | None = Field(
+        default=None, pattern=r"^[0-9a-f]{64}$"
+    )
+    business_state_after_digest: str | None = Field(
+        default=None, pattern=r"^[0-9a-f]{64}$"
+    )
+    telemetry: InvocationTelemetry = Field(default_factory=InvocationTelemetry)
     result: dict[str, Any]
+
+
+class PersistenceRuntimeOverride(V2Model):
+    sqlite_path: str
+
+
+class EvaluationRuntimeOverrides(V2Model):
+    persistence: PersistenceRuntimeOverride
 
 
 class CrossProcessEvidence(V2Model):
@@ -118,6 +141,13 @@ def evaluate_module8_cross_process_acceptance(
             command=command,
             exit_code=completed.returncode,
             pid=result.get("pid"),
+            business_state_before_digest=result.get(
+                "business_state_before_digest"
+            ),
+            business_state_after_digest=result.get("business_state_after_digest"),
+            telemetry=InvocationTelemetry.model_validate(
+                result.get("telemetry", {})
+            ),
             result=result,
         )
 
@@ -176,7 +206,21 @@ def evaluate_module8_cross_process_acceptance(
         ).encode()
     ).hexdigest():
         raise ValueError("written cross-process artifact digest verification failed")
-    all_passed = all(item.passed for item in [*steps, *negative_contracts])
+    invocation_contracts_passed = all(
+        item.passed for item in [*steps, *negative_contracts]
+    )
+    try:
+        final_audit = _audit_from_completed_invocation(completed)
+    except (TypeError, ValueError):
+        final_audit = None
+    audit_clear = bool(
+        final_audit is not None
+        and not any(final_audit.model_dump(mode="json").values())
+    )
+    all_passed = invocation_contracts_passed and audit_clear
+    runtime_overrides = EvaluationRuntimeOverrides(
+        persistence=PersistenceRuntimeOverride(sqlite_path=str(database))
+    )
     stage_report = {
         "report_schema_version": 1,
         "producer": "v2_3_stage_evaluator",
@@ -187,7 +231,11 @@ def evaluate_module8_cross_process_acceptance(
         "target_stage": "v2_3",
         "request_id": request_id,
         "thread_id": request_id,
-        "resolved_config": runtime_config.resolved_record(),
+        # Baseline identity excludes the ephemeral acceptance database.  The
+        # worker still executes with ``runtime_config`` below, while this
+        # report remains directly consumable by the final baseline loader.
+        "resolved_config": base_config.resolved_record(),
+        "runtime_overrides": runtime_overrides.model_dump(mode="json"),
         "cross_process_acceptance_ref": str(cross_path),
         "cross_process_acceptance_digest": _sha256(cross_path),
         "metrics": {
@@ -209,14 +257,45 @@ def evaluate_module8_cross_process_acceptance(
             "process_invocation_count": invocation_index,
             "final_execution_status": completed.result.get("execution_status"),
             "final_answer_outcome": completed.result.get("answer_outcome"),
-            "technical_failure_count": 0 if all_passed else 1,
-            "degraded_retrieval_count": 0,
-            "invariant_violation_count": 0 if all_passed else 1,
-            "schema_invariant_violation_count": 0 if all_passed else 1,
-            "provenance_violation_count": 0,
-            "citation_violation_count": 0,
-            "budget_violation_count": 0,
+            "technical_failure_count": (
+                int(completed.result.get("technical_failure_count", 0))
+                if invocation_contracts_passed
+                else 1
+            ),
+            "degraded_retrieval_count": (
+                final_audit.retrieval_degraded_queries_count
+                if final_audit is not None
+                else None
+            ),
+            "invariant_violation_count": (
+                final_audit.schema_invariant_violation_count
+                if final_audit is not None
+                else None
+            ),
+            "schema_invariant_violation_count": (
+                final_audit.schema_invariant_violation_count
+                if final_audit is not None
+                else None
+            ),
+            "provenance_violation_count": (
+                final_audit.provenance_violation_count
+                if final_audit is not None
+                else None
+            ),
+            "citation_violation_count": (
+                final_audit.citation_violation_count
+                if final_audit is not None
+                else None
+            ),
+            "budget_violation_count": (
+                final_audit.budget_violation_count
+                if final_audit is not None
+                else None
+            ),
         },
+        "evaluation_incomplete": not (
+            invocation_contracts_passed and final_audit is not None
+        ),
         "artifact_digest": "",
     }
     stage_report["artifact_digest"] = _report_digest(stage_report)
@@ -237,6 +316,18 @@ def evaluate_module8_cross_process_acceptance(
     }
 
 
+def _audit_from_completed_invocation(
+    completed: CrossProcessInvocation,
+) -> "AuditCounts":
+    from .audit import AuditCounts
+
+    if completed.name != "status_completed":
+        raise ValueError("final audit must come from status_completed")
+    if completed.result.get("audit_source") != "durable_checkpoint_state":
+        raise ValueError("final audit is not derived from durable checkpoint state")
+    return AuditCounts.model_validate(completed.result.get("audit_counts"))
+
+
 def _cross_invocation_passed(
     name: str, exit_code: int, result: dict[str, Any]
 ) -> bool:
@@ -251,16 +342,41 @@ def _cross_invocation_passed(
     if name == "status_completed":
         return result.get("execution_status") == "completed" and result.get("resumable") is False
     if name == "invalid_payload":
-        return result.get("error_code") == "resume_payload_invalid" and result.get("execution_status") == "waiting_user"
+        return (
+            result.get("error_code") == "resume_payload_invalid"
+            and result.get("execution_status") == "waiting_user"
+            and _negative_invocation_has_zero_side_effects(result)
+        )
     if name == "duplicate_resume":
-        return result.get("execution_status") == "completed" and result.get("new_query_revision_count") == 1 and result.get("hitl_rounds") == 1
+        return (
+            result.get("execution_status") == "completed"
+            and result.get("new_query_revision_count") == 1
+            and result.get("hitl_rounds") == 1
+            and _negative_invocation_has_zero_side_effects(result)
+        )
     if name == "stale_resume":
-        return result.get("error_code") == "resume_conflict"
+        return (
+            result.get("error_code") == "resume_conflict"
+            and _negative_invocation_has_zero_side_effects(result)
+        )
     if name == "expired_checkpoint":
         return result.get("error_code") == "checkpoint_expired"
     if name == "lease_recovery":
         return result.get("execution_status") == "completed" and result.get("answer_outcome") == "complete"
     return False
+
+
+def _negative_invocation_has_zero_side_effects(result: dict[str, Any]) -> bool:
+    telemetry = result.get("telemetry")
+    before = result.get("business_state_before_digest")
+    after = result.get("business_state_after_digest")
+    return bool(
+        isinstance(telemetry, dict)
+        and not any(telemetry.values())
+        and isinstance(before, str)
+        and before
+        and before == after
+    )
 
 
 def evaluate_module8_start(

@@ -21,6 +21,9 @@ from .final_baseline import (
 from .module8 import (
     CrossProcessEvidence,
     CrossProcessInvocation,
+    EvaluationRuntimeOverrides,
+    InvocationTelemetry,
+    PersistenceRuntimeOverride,
     evaluate_module8_cross_process_acceptance,
 )
 
@@ -57,6 +60,9 @@ __all__ = [
     "BaselineCandidateReport",
     "CrossProcessEvidence",
     "CrossProcessInvocation",
+    "EvaluationRuntimeOverrides",
+    "InvocationTelemetry",
+    "PersistenceRuntimeOverride",
     "evaluate_module8_cross_process_acceptance",
     "evaluate_baseline",
     "load_workflow_scenarios",

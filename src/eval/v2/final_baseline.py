@@ -1597,6 +1597,30 @@ def _check_cross_process_gate(
             == list(range(1, len(invocations) + 1))
             and all(item.command and item.exit_code == 0 for item in invocations)
         )
+        zero_side_effect_names = {
+            "invalid_payload",
+            "duplicate_resume",
+            "stale_resume",
+        }
+        zero_side_effect_items = [
+            item
+            for item in evidence.negative_contracts
+            if item.name in zero_side_effect_names
+        ]
+        zero_execution_ok = (
+            {item.name for item in zero_side_effect_items}
+            == zero_side_effect_names
+            and all(
+                not any(item.telemetry.model_dump(mode="json").values())
+                for item in zero_side_effect_items
+            )
+        )
+        zero_mutation_ok = all(
+            item.business_state_before_digest is not None
+            and item.business_state_before_digest
+            == item.business_state_after_digest
+            for item in zero_side_effect_items
+        )
         negative_ok = negative_names == [
             "invalid_payload",
             "duplicate_resume",
@@ -1608,8 +1632,36 @@ def _check_cross_process_gate(
         if current_git_commit is not None:
             allowed_commits.add(current_git_commit)
         commit_ok = evidence.git_commit in allowed_commits
-        passed = digest_ok and names == ["start", "status_waiting", "resume", "status_completed"] and ids_ok and evidence.request_id == evidence.thread_id and negative_ok and process_evidence_ok and commit_ok and all(step.passed for step in evidence.steps)
-        return {"passed": passed, "evaluated": True, "status": "checked", "path": str(path), "sha256": _sha256(path), "run_id": evidence.run_id, "digest_valid": digest_ok, "git_commit_allowed": commit_ok, "allowed_git_commits": sorted(allowed_commits), "request_id": evidence.request_id, "thread_id": evidence.thread_id, "step_count": len(evidence.steps), "negative_contracts": negative_ok, "process_invocation_evidence": process_evidence_ok}
+        passed = (
+            digest_ok
+            and names == ["start", "status_waiting", "resume", "status_completed"]
+            and ids_ok
+            and evidence.request_id == evidence.thread_id
+            and negative_ok
+            and zero_execution_ok
+            and zero_mutation_ok
+            and process_evidence_ok
+            and commit_ok
+            and all(step.passed for step in evidence.steps)
+        )
+        return {
+            "passed": passed,
+            "evaluated": True,
+            "status": "checked",
+            "path": str(path),
+            "sha256": _sha256(path),
+            "run_id": evidence.run_id,
+            "digest_valid": digest_ok,
+            "git_commit_allowed": commit_ok,
+            "allowed_git_commits": sorted(allowed_commits),
+            "request_id": evidence.request_id,
+            "thread_id": evidence.thread_id,
+            "step_count": len(evidence.steps),
+            "negative_contracts": negative_ok,
+            "negative_zero_execution": zero_execution_ok,
+            "negative_zero_business_mutation": zero_mutation_ok,
+            "process_invocation_evidence": process_evidence_ok,
+        }
     except Exception as exc:
         return {"passed": False, "evaluated": False, "status": "invalid", "path": str(path), "error": _safe_error(exc)}
 

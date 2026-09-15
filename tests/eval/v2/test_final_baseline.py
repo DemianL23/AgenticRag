@@ -107,6 +107,7 @@ def _valid_cross_process_report(path: Path, *, git_commit: str) -> Path:
     )
 
     def invocation(name: str, index: int) -> dict[str, object]:
+        state_digest = "a" * 64
         return {
             "name": name,
             "passed": True,
@@ -116,6 +117,15 @@ def _valid_cross_process_report(path: Path, *, git_commit: str) -> Path:
             "command": ["python", "-m", "eval.v2.module8_worker", name],
             "exit_code": 0,
             "pid": index,
+            "business_state_before_digest": state_digest,
+            "business_state_after_digest": state_digest,
+            "telemetry": {
+                "retrieval_calls": 0,
+                "grader_calls": 0,
+                "finding_calls": 0,
+                "synthesis_calls": 0,
+                "hitl_calls": 0,
+            },
             "result": {"contract": name},
         }
 
@@ -136,6 +146,29 @@ def _valid_cross_process_report(path: Path, *, git_commit: str) -> Path:
         {key: value for key, value in payload.items() if key != "artifact_digest"}
     )
     return _write_json(path, payload)
+
+
+def _mutate_cross_invocation(
+    path: Path,
+    name: str,
+    *,
+    telemetry: dict[str, int] | None = None,
+    after_digest: str | None = None,
+) -> None:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    invocation = next(
+        item
+        for item in [*payload["steps"], *payload["negative_contracts"]]
+        if item["name"] == name
+    )
+    if telemetry is not None:
+        invocation["telemetry"].update(telemetry)
+    if after_digest is not None:
+        invocation["business_state_after_digest"] = after_digest
+    payload["artifact_digest"] = _json_digest(
+        {key: value for key, value in payload.items() if key != "artifact_digest"}
+    )
+    path.write_text(json.dumps(payload), encoding="utf-8")
 
 
 def _valid_evaluator_and_stage_reports(root: Path) -> dict[str, Path]:
@@ -761,6 +794,45 @@ def test_cross_process_evidence_enforces_git_identity(tmp_path: Path) -> None:
     assert result["git_commit_allowed"] is True
 
 
+@pytest.mark.parametrize(
+    ("name", "telemetry"),
+    [
+        ("duplicate_resume", {"retrieval_calls": 1}),
+        ("invalid_payload", {"grader_calls": 1}),
+        ("invalid_payload", {"hitl_calls": 1}),
+    ],
+)
+def test_cross_process_negative_contract_rejects_execution_telemetry(
+    tmp_path: Path, name: str, telemetry: dict[str, int]
+) -> None:
+    path = _valid_cross_process_report(
+        tmp_path / f"{name}.json", git_commit=MODULE8_FROZEN_IMPLEMENTATION_SHA
+    )
+    _mutate_cross_invocation(path, name, telemetry=telemetry)
+
+    result = _check_cross_process_gate(path)
+
+    assert result["passed"] is False
+    assert result["negative_zero_execution"] is False
+
+
+@pytest.mark.parametrize(
+    "name", ["duplicate_resume", "invalid_payload", "stale_resume"]
+)
+def test_cross_process_negative_contract_rejects_business_state_mutation(
+    tmp_path: Path, name: str
+) -> None:
+    path = _valid_cross_process_report(
+        tmp_path / f"{name}.json", git_commit=MODULE8_FROZEN_IMPLEMENTATION_SHA
+    )
+    _mutate_cross_invocation(path, name, after_digest="b" * 64)
+
+    result = _check_cross_process_gate(path)
+
+    assert result["passed"] is False
+    assert result["negative_zero_business_mutation"] is False
+
+
 def test_provenance_auditor_rejects_wrong_task_occurrence() -> None:
     attempt = RetrievalAttempt(
         id="ATT_SQ001_QR001_001",
@@ -979,3 +1051,24 @@ def test_stage_degraded_retrieval_feeds_global_gate(
     )
     assert result["invariant_counts"]["retrieval_degraded_queries_count"] >= 1
     assert result["hard_gates"]["retrieval_degraded_queries_zero"] is False
+
+
+def test_v23_final_state_provenance_violation_feeds_global_gate(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(baseline, "_git_dirty", lambda: False)
+    reports = _valid_evaluator_and_stage_reports(tmp_path)
+    _mutate_signed_report(
+        reports["stage_v23_report"], provenance_violation_count=1
+    )
+
+    result = evaluate_baseline(
+        output_root=tmp_path / "out",
+        run_id="v23-provenance",
+        mode="contract",
+        config=V2Config(),
+        **reports,
+    )
+
+    assert result["invariant_counts"]["provenance_violation_count"] >= 1
+    assert result["hard_gates"]["provenance_violation_zero"] is False
