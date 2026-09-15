@@ -170,13 +170,15 @@ def _run(operation: str, request_id: str, config: V2Config) -> dict[str, object]
                     },
                     before=before,
                     after=_business_state(service, request_id),
-                    telemetries=(start_telemetry, resume_telemetry),
+                    telemetries=(resume_telemetry,),
+                    fixture_telemetries=(start_telemetry,),
                 )
             return _with_observability(
                 {"pid": os.getpid(), "request_id": request_id, "error_code": None},
                 before=before,
                 after=_business_state(service, request_id),
-                telemetries=(start_telemetry, resume_telemetry),
+                telemetries=(resume_telemetry,),
+                fixture_telemetries=(start_telemetry,),
             )
         finally:
             service.close()
@@ -262,11 +264,11 @@ def _run(operation: str, request_id: str, config: V2Config) -> dict[str, object]
                     },
                 )
             except PersistenceError as exc:
+                status = service.status(request_id).to_json()
                 return _with_observability(
                     {
                         "pid": os.getpid(),
-                        "request_id": request_id,
-                        "thread_id": request_id,
+                        **status,
                         "error_code": exc.code,
                     },
                     before=before,
@@ -398,21 +400,31 @@ def _with_observability(
     before: dict[str, object] | None,
     after: dict[str, object] | None,
     telemetries: tuple[HarnessTelemetry, ...] = (),
+    fixture_telemetries: tuple[HarnessTelemetry, ...] = (),
 ) -> dict[str, object]:
-    telemetry = {
-        "retrieval_calls": sum(len(item.backend_calls) for item in telemetries),
-        "grader_calls": sum(len(item.grader_calls) for item in telemetries),
-        "finding_calls": sum(len(item.finding_calls) for item in telemetries),
-        "synthesis_calls": sum(item.synthesis_calls for item in telemetries),
-        "hitl_calls": sum(item.hitl_calls for item in telemetries),
-    }
-    return {
+    telemetry = _telemetry_counts(telemetries)
+    result = {
         **payload,
         "business_state_before": before,
         "business_state_after": after,
         "business_state_before_digest": _business_digest(before),
         "business_state_after_digest": _business_digest(after),
         "telemetry": telemetry,
+    }
+    if fixture_telemetries:
+        result["fixture_telemetry"] = _telemetry_counts(fixture_telemetries)
+    return result
+
+
+def _telemetry_counts(
+    telemetries: tuple[HarnessTelemetry, ...],
+) -> dict[str, int]:
+    return {
+        "retrieval_calls": sum(len(item.backend_calls) for item in telemetries),
+        "grader_calls": sum(len(item.grader_calls) for item in telemetries),
+        "finding_calls": sum(len(item.finding_calls) for item in telemetries),
+        "synthesis_calls": sum(item.synthesis_calls for item in telemetries),
+        "hitl_calls": sum(item.hitl_calls for item in telemetries),
     }
 
 

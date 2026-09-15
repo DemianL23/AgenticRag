@@ -37,7 +37,7 @@ from agenticrag.v2.types import (
 )
 from .audit import AuditCounts, audit_v2_result
 from .contract_harness import run_contract_scenario
-from .module8 import CrossProcessEvidence
+from .module8 import CrossProcessEvidence, CrossProcessInvocation
 from .planning import load_planning_samples
 from eval.retrieval_runner import load_retrieval_dataset
 
@@ -1597,10 +1597,30 @@ def _check_cross_process_gate(
             == list(range(1, len(invocations) + 1))
             and all(item.command and item.exit_code == 0 for item in invocations)
         )
+        invocation_by_name = {item.name: item for item in invocations}
+        expected_invocation_order = (
+            "start",
+            "status_waiting",
+            "invalid_payload",
+            "stale_resume",
+            "resume",
+            "duplicate_resume",
+            "status_completed",
+            "expired_checkpoint",
+            "lease_recovery",
+        )
+        invocation_order_ok = (
+            set(invocation_by_name) == set(expected_invocation_order)
+            and [
+                invocation_by_name[name].invocation_index
+                for name in expected_invocation_order
+            ] == list(range(1, len(expected_invocation_order) + 1))
+        )
         zero_side_effect_names = {
             "invalid_payload",
             "duplicate_resume",
             "stale_resume",
+            "expired_checkpoint",
         }
         zero_side_effect_items = [
             item
@@ -1621,10 +1641,42 @@ def _check_cross_process_gate(
             == item.business_state_after_digest
             for item in zero_side_effect_items
         )
+        primary_request_negative_names = {
+            "invalid_payload",
+            "stale_resume",
+            "duplicate_resume",
+        }
+        primary_request_negatives = [
+            item
+            for item in evidence.negative_contracts
+            if item.name in primary_request_negative_names
+        ]
+        primary_request_identity_ok = (
+            {item.name for item in primary_request_negatives}
+            == primary_request_negative_names
+            and all(
+                item.request_id == evidence.request_id
+                and item.thread_id == evidence.thread_id
+                for item in primary_request_negatives
+            )
+        )
+        stale = next(
+            (item for item in primary_request_negatives if item.name == "stale_resume"),
+            None,
+        )
+        stale_pending_ok = bool(
+            stale is not None
+            and stale.result.get("execution_status") == "waiting_user"
+            and stale.result.get("resumable") is True
+            and _cross_pending_identity_unchanged(stale.result)
+        )
+        negative_result_contracts_ok = _cross_negative_result_contracts(
+            evidence.negative_contracts
+        )
         negative_ok = negative_names == [
             "invalid_payload",
-            "duplicate_resume",
             "stale_resume",
+            "duplicate_resume",
             "expired_checkpoint",
             "lease_recovery",
         ] and all(item.passed for item in evidence.negative_contracts)
@@ -1640,7 +1692,11 @@ def _check_cross_process_gate(
             and negative_ok
             and zero_execution_ok
             and zero_mutation_ok
+            and primary_request_identity_ok
+            and stale_pending_ok
+            and negative_result_contracts_ok
             and process_evidence_ok
+            and invocation_order_ok
             and commit_ok
             and all(step.passed for step in evidence.steps)
         )
@@ -1660,10 +1716,56 @@ def _check_cross_process_gate(
             "negative_contracts": negative_ok,
             "negative_zero_execution": zero_execution_ok,
             "negative_zero_business_mutation": zero_mutation_ok,
+            "primary_request_negative_identity": primary_request_identity_ok,
+            "stale_pending_identity": stale_pending_ok,
+            "negative_result_contracts": negative_result_contracts_ok,
             "process_invocation_evidence": process_evidence_ok,
+            "invocation_order": invocation_order_ok,
         }
     except Exception as exc:
         return {"passed": False, "evaluated": False, "status": "invalid", "path": str(path), "error": _safe_error(exc)}
+
+
+def _cross_pending_identity_unchanged(result: dict[str, Any]) -> bool:
+    before = result.get("business_state_before")
+    after = result.get("business_state_after")
+    return bool(
+        isinstance(before, dict)
+        and isinstance(after, dict)
+        and before.get("pending_hitl_request_id")
+        and before.get("pending_hitl_request_id")
+        == after.get("pending_hitl_request_id")
+    )
+
+
+def _cross_negative_result_contracts(
+    negative_contracts: list[CrossProcessInvocation],
+) -> bool:
+    """Validate negative durable outcomes from worker evidence, not ``passed``."""
+
+    by_name = {item.name: item for item in negative_contracts}
+    invalid = by_name.get("invalid_payload")
+    stale = by_name.get("stale_resume")
+    duplicate = by_name.get("duplicate_resume")
+    expired = by_name.get("expired_checkpoint")
+    lease = by_name.get("lease_recovery")
+    return bool(
+        invalid is not None
+        and invalid.result.get("error_code") == "resume_payload_invalid"
+        and invalid.result.get("execution_status") == "waiting_user"
+        and stale is not None
+        and stale.result.get("error_code") == "resume_conflict"
+        and stale.result.get("execution_status") == "waiting_user"
+        and duplicate is not None
+        and duplicate.result.get("execution_status") == "completed"
+        and duplicate.result.get("new_query_revision_count") == 1
+        and duplicate.result.get("hitl_rounds") == 1
+        and expired is not None
+        and expired.result.get("error_code") == "checkpoint_expired"
+        and lease is not None
+        and lease.result.get("execution_status") == "completed"
+        and lease.result.get("answer_outcome") == "complete"
+    )
 
 
 def _report_digest(report: BaselineCandidateReport) -> str:

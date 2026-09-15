@@ -47,16 +47,30 @@ def test_cross_process_producer_emits_separate_valid_artifacts(
         "status_completed",
     ]
     assert all(step.command and step.exit_code == 0 for step in evidence.steps)
+    assert [item.name for item in evidence.negative_contracts] == [
+        "invalid_payload",
+        "stale_resume",
+        "duplicate_resume",
+        "expired_checkpoint",
+        "lease_recovery",
+    ]
     assert all(item.passed for item in evidence.negative_contracts)
     zero_side_effects = {
         item.name: item
         for item in evidence.negative_contracts
-        if item.name in {"invalid_payload", "duplicate_resume", "stale_resume"}
+        if item.name
+        in {
+            "invalid_payload",
+            "stale_resume",
+            "duplicate_resume",
+            "expired_checkpoint",
+        }
     }
     assert set(zero_side_effects) == {
         "invalid_payload",
-        "duplicate_resume",
         "stale_resume",
+        "duplicate_resume",
+        "expired_checkpoint",
     }
     assert all(
         not any(item.telemetry.model_dump().values())
@@ -64,6 +78,33 @@ def test_cross_process_producer_emits_separate_valid_artifacts(
         == item.business_state_after_digest
         for item in zero_side_effects.values()
     )
+    expired = zero_side_effects["expired_checkpoint"]
+    assert expired.result["error_code"] == "checkpoint_expired"
+    assert expired.fixture_telemetry is not None
+    assert expired.fixture_telemetry.retrieval_calls == 1
+    stale = zero_side_effects["stale_resume"]
+    assert stale.result["execution_status"] == "waiting_user"
+    assert stale.result["business_state_before"]["pending_hitl_request_id"] == (
+        stale.result["business_state_after"]["pending_hitl_request_id"]
+    )
+    order = {
+        item.name: item.invocation_index
+        for item in [*evidence.steps, *evidence.negative_contracts]
+    }
+    assert [
+        order[name]
+        for name in (
+            "start",
+            "status_waiting",
+            "invalid_payload",
+            "stale_resume",
+            "resume",
+            "duplicate_resume",
+            "status_completed",
+            "expired_checkpoint",
+            "lease_recovery",
+        )
+    ] == list(range(1, 10))
     assert _check_cross_process_gate(
         cross_path, current_git_commit=evidence.git_commit
     )["passed"] is True

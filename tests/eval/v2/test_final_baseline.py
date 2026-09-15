@@ -94,20 +94,61 @@ def _valid_retrieval_report(path: Path) -> Path:
 
 def _valid_cross_process_report(path: Path, *, git_commit: str) -> Path:
     request_id = "8db660d1-9b3b-4d68-8dca-73b32bd5374e"
-    names = (
+    step_names = (
         "start",
         "status_waiting",
         "resume",
         "status_completed",
+    )
+    negative_names = (
         "invalid_payload",
-        "duplicate_resume",
         "stale_resume",
+        "duplicate_resume",
         "expired_checkpoint",
         "lease_recovery",
     )
+    invocation_order = {
+        "start": 1,
+        "status_waiting": 2,
+        "invalid_payload": 3,
+        "stale_resume": 4,
+        "resume": 5,
+        "duplicate_resume": 6,
+        "status_completed": 7,
+        "expired_checkpoint": 8,
+        "lease_recovery": 9,
+    }
 
     def invocation(name: str, index: int) -> dict[str, object]:
         state_digest = "a" * 64
+        waiting_state = {
+            "pending_hitl_request_id": "HITL_001",
+            "execution_status": "waiting_user",
+        }
+        result: dict[str, object] = {"contract": name}
+        if name == "invalid_payload":
+            result.update(
+                error_code="resume_payload_invalid",
+                execution_status="waiting_user",
+            )
+        if name == "stale_resume":
+            result.update(
+                error_code="resume_conflict",
+                execution_status="waiting_user",
+                resumable=True,
+                business_state_before=waiting_state,
+                business_state_after=dict(waiting_state),
+            )
+        if name == "duplicate_resume":
+            result.update(
+                execution_status="completed",
+                new_query_revision_count=1,
+                hitl_rounds=1,
+            )
+        if name == "expired_checkpoint":
+            result.update(error_code="checkpoint_expired")
+        if name == "lease_recovery":
+            result.update(execution_status="completed", answer_outcome="complete")
         return {
             "name": name,
             "passed": True,
@@ -126,7 +167,7 @@ def _valid_cross_process_report(path: Path, *, git_commit: str) -> Path:
                 "synthesis_calls": 0,
                 "hitl_calls": 0,
             },
-            "result": {"contract": name},
+            "result": result,
         }
 
     payload: dict[str, object] = {
@@ -136,9 +177,11 @@ def _valid_cross_process_report(path: Path, *, git_commit: str) -> Path:
         "git_commit": git_commit,
         "request_id": request_id,
         "thread_id": request_id,
-        "steps": [invocation(name, index) for index, name in enumerate(names[:4], 1)],
+        "steps": [
+            invocation(name, invocation_order[name]) for name in step_names
+        ],
         "negative_contracts": [
-            invocation(name, index) for index, name in enumerate(names[4:], 5)
+            invocation(name, invocation_order[name]) for name in negative_names
         ],
         "artifact_digest": "",
     }
@@ -154,6 +197,9 @@ def _mutate_cross_invocation(
     *,
     telemetry: dict[str, int] | None = None,
     after_digest: str | None = None,
+    request_id: str | None = None,
+    thread_id: str | None = None,
+    result_updates: dict[str, object] | None = None,
 ) -> None:
     payload = json.loads(path.read_text(encoding="utf-8"))
     invocation = next(
@@ -165,6 +211,12 @@ def _mutate_cross_invocation(
         invocation["telemetry"].update(telemetry)
     if after_digest is not None:
         invocation["business_state_after_digest"] = after_digest
+    if request_id is not None:
+        invocation["request_id"] = request_id
+    if thread_id is not None:
+        invocation["thread_id"] = thread_id
+    if result_updates is not None:
+        invocation["result"].update(result_updates)
     payload["artifact_digest"] = _json_digest(
         {key: value for key, value in payload.items() if key != "artifact_digest"}
     )
@@ -800,6 +852,7 @@ def test_cross_process_evidence_enforces_git_identity(tmp_path: Path) -> None:
         ("duplicate_resume", {"retrieval_calls": 1}),
         ("invalid_payload", {"grader_calls": 1}),
         ("invalid_payload", {"hitl_calls": 1}),
+        ("expired_checkpoint", {"retrieval_calls": 1}),
     ],
 )
 def test_cross_process_negative_contract_rejects_execution_telemetry(
@@ -817,7 +870,12 @@ def test_cross_process_negative_contract_rejects_execution_telemetry(
 
 
 @pytest.mark.parametrize(
-    "name", ["duplicate_resume", "invalid_payload", "stale_resume"]
+    "name", [
+        "duplicate_resume",
+        "invalid_payload",
+        "stale_resume",
+        "expired_checkpoint",
+    ]
 )
 def test_cross_process_negative_contract_rejects_business_state_mutation(
     tmp_path: Path, name: str
@@ -831,6 +889,65 @@ def test_cross_process_negative_contract_rejects_business_state_mutation(
 
     assert result["passed"] is False
     assert result["negative_zero_business_mutation"] is False
+
+
+def test_cross_process_stale_resume_requires_pending_waiting_evidence(
+    tmp_path: Path,
+) -> None:
+    path = _valid_cross_process_report(
+        tmp_path / "stale-after-completed.json",
+        git_commit=MODULE8_FROZEN_IMPLEMENTATION_SHA,
+    )
+    _mutate_cross_invocation(
+        path,
+        "stale_resume",
+        result_updates={
+            "execution_status": "completed",
+            "resumable": False,
+            "business_state_after": {"pending_hitl_request_id": None},
+        },
+    )
+
+    result = _check_cross_process_gate(path)
+
+    assert result["passed"] is False
+    assert result["stale_pending_identity"] is False
+
+
+def test_cross_process_primary_negative_contract_requires_main_identity(
+    tmp_path: Path,
+) -> None:
+    path = _valid_cross_process_report(
+        tmp_path / "foreign-stale.json",
+        git_commit=MODULE8_FROZEN_IMPLEMENTATION_SHA,
+    )
+    _mutate_cross_invocation(
+        path,
+        "stale_resume",
+        request_id="other-request",
+        thread_id="other-request",
+    )
+
+    result = _check_cross_process_gate(path)
+
+    assert result["passed"] is False
+    assert result["primary_request_negative_identity"] is False
+
+
+def test_cross_process_valid_expired_and_waiting_stale_contracts_pass(
+    tmp_path: Path,
+) -> None:
+    path = _valid_cross_process_report(
+        tmp_path / "valid-negative-contracts.json",
+        git_commit=MODULE8_FROZEN_IMPLEMENTATION_SHA,
+    )
+
+    result = _check_cross_process_gate(path)
+
+    assert result["passed"] is True
+    assert result["negative_zero_execution"] is True
+    assert result["negative_zero_business_mutation"] is True
+    assert result["stale_pending_identity"] is True
 
 
 def test_provenance_auditor_rejects_wrong_task_occurrence() -> None:

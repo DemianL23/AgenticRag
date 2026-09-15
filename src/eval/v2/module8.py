@@ -53,6 +53,7 @@ class CrossProcessInvocation(V2Model):
         default=None, pattern=r"^[0-9a-f]{64}$"
     )
     telemetry: InvocationTelemetry = Field(default_factory=InvocationTelemetry)
+    fixture_telemetry: InvocationTelemetry | None = None
     result: dict[str, Any]
 
 
@@ -148,20 +149,25 @@ def evaluate_module8_cross_process_acceptance(
             telemetry=InvocationTelemetry.model_validate(
                 result.get("telemetry", {})
             ),
+            fixture_telemetry=(
+                InvocationTelemetry.model_validate(result["fixture_telemetry"])
+                if result.get("fixture_telemetry") is not None
+                else None
+            ),
             result=result,
         )
 
     start = invoke("start", "start", request_id)
     waiting = invoke("status_waiting", "status", request_id)
     invalid = invoke("invalid_payload", "invalid", request_id)
+    stale = invoke("stale_resume", "stale", request_id)
     resume = invoke("resume", "resume", request_id)
     duplicate = invoke("duplicate_resume", "duplicate", request_id)
-    stale = invoke("stale_resume", "stale", request_id)
     completed = invoke("status_completed", "status", request_id)
     expired = invoke("expired_checkpoint", "expired", str(uuid4()))
     lease = invoke("lease_recovery", "lease_recovery", str(uuid4()))
     steps = [start, waiting, resume, completed]
-    negative_contracts = [invalid, duplicate, stale, expired, lease]
+    negative_contracts = [invalid, stale, duplicate, expired, lease]
     evidence_payload = CrossProcessEvidence(
         run_id=run_id,
         git_commit=_git_commit() or "0" * 40,
@@ -357,10 +363,16 @@ def _cross_invocation_passed(
     if name == "stale_resume":
         return (
             result.get("error_code") == "resume_conflict"
+            and result.get("execution_status") == "waiting_user"
+            and result.get("resumable") is True
+            and _pending_identity_unchanged(result)
             and _negative_invocation_has_zero_side_effects(result)
         )
     if name == "expired_checkpoint":
-        return result.get("error_code") == "checkpoint_expired"
+        return (
+            result.get("error_code") == "checkpoint_expired"
+            and _negative_invocation_has_zero_side_effects(result)
+        )
     if name == "lease_recovery":
         return result.get("execution_status") == "completed" and result.get("answer_outcome") == "complete"
     return False
@@ -376,6 +388,18 @@ def _negative_invocation_has_zero_side_effects(result: dict[str, Any]) -> bool:
         and isinstance(before, str)
         and before
         and before == after
+    )
+
+
+def _pending_identity_unchanged(result: dict[str, Any]) -> bool:
+    before = result.get("business_state_before")
+    after = result.get("business_state_after")
+    return bool(
+        isinstance(before, dict)
+        and isinstance(after, dict)
+        and before.get("pending_hitl_request_id")
+        and before.get("pending_hitl_request_id")
+        == after.get("pending_hitl_request_id")
     )
 
 
