@@ -716,6 +716,40 @@ def test_full_profile_missing_planning_evaluation_is_incomplete(
     assert result["evaluation_incomplete"] is True
 
 
+def test_planning_provider_failure_stays_incomplete_without_schema_mislabel(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    commit = "c" * 40
+    monkeypatch.setattr(baseline, "_git_commit", lambda: commit)
+    monkeypatch.setattr(baseline, "_git_dirty", lambda: False)
+    monkeypatch.setattr(baseline, "_contract_prediction", _passing_scenario_prediction)
+    monkeypatch.setattr(baseline, "_real_prediction", _passing_scenario_prediction)
+    reports = _valid_evaluator_and_stage_reports(tmp_path)
+    payload = json.loads(reports["planning_report"].read_text(encoding="utf-8"))
+    payload["evaluation_incomplete"] = True
+    payload["structural_violations"] = {
+        "schema_invariant_violations": 0,
+        "technical_planning_failures": 1,
+    }
+    payload["artifact_digest"] = ""
+    payload["artifact_digest"] = _json_digest(payload)
+    reports["planning_report"].write_text(json.dumps(payload), encoding="utf-8")
+
+    result = evaluate_baseline(
+        output_root=tmp_path / "out",
+        run_id="planning-provider-incomplete",
+        profile="full_baseline",
+        config=V2Config(),
+        retrieval_report=_valid_retrieval_report(tmp_path / "retrieval.json"),
+        **reports,
+    )
+
+    assert result["invariant_counts"]["schema_invariant_violation_count"] == 0
+    assert result["hard_gates"]["schema_invariant_zero"] is True
+    assert result["evaluation_incomplete"] is True
+    assert result["freeze_eligible"] is False
+
+
 def test_actual_planning_and_module4_artifact_metrics_are_populated(
     tmp_path: Path,
 ) -> None:

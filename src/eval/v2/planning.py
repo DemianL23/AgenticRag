@@ -13,10 +13,15 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from pydantic import Field, model_validator
+from pydantic import Field, ValidationError, model_validator
 
 from agenticrag.v2.config import ModelRetryPolicy, V2Config
-from agenticrag.v2.planning import PlanningError, PlanningService, _invoke_structured
+from agenticrag.v2.planning import (
+    PlanningError,
+    PlanningService,
+    StructuredOutputContractError,
+    _invoke_structured,
+)
 from agenticrag.v2.schemas import TaskDraft, V2Model
 from agenticrag.v2.types import Complexity, GlobalAnswerOutcome, TaskCapability
 
@@ -259,6 +264,8 @@ def evaluate_planning(
         "simple_decomposer_calls": 0,
         "complex_missing_decomposition": 0,
         "complex_null_capability_contract_violations": 0,
+        "structured_output_contract_failures": 0,
+        "technical_planning_failures": 0,
     }
     per_sample: list[dict[str, Any]] = []
     complexity_correct = 0
@@ -297,7 +304,7 @@ def evaluate_planning(
         try:
             result = planner.plan(sample.question)
         except PlanningError as exc:
-            structural["schema_invariant_violations"] += 1
+            _record_planning_error(structural, exc)
             evaluation_incomplete = True
             item["errors"].append(_planning_error_diagnostic(exc))
             item["latency_seconds"]["planning_total"] = time.perf_counter() - sample_started
@@ -425,6 +432,7 @@ def evaluate_planning(
                             ):
                                 complex_capability_correct += 1
                 except PlanningError as exc:
+                    _record_planning_error(structural, exc)
                     evaluation_incomplete = True
                     item["errors"].append(_planning_error_diagnostic(exc))
                     item["latency_seconds"]["planning_judge"] = time.perf_counter() - judge_started
@@ -505,8 +513,32 @@ def _planning_error_diagnostic(exc: PlanningError) -> dict[str, Any]:
 
     return {
         **exc.execution_error.model_dump(mode="json"),
+        "classification": _planning_error_classification(exc),
         "cause": safe_exception_diagnostic(exc.cause),
     }
+
+
+def _record_planning_error(structural: dict[str, int], exc: PlanningError) -> None:
+    """Classify failed planning without treating provider failures as schemas.
+
+    A failed evaluation remains incomplete in every case.  Only a parsed-model
+    validation or deterministic planning-contract failure contributes to the
+    schema-invariant audit; connection, timeout, and provider failures are
+    recorded separately as technical evaluation failures.
+    """
+
+    classification = _planning_error_classification(exc)
+    if classification == "structured_output_contract_failure":
+        structural["schema_invariant_violations"] += 1
+        structural["structured_output_contract_failures"] += 1
+    else:
+        structural["technical_planning_failures"] += 1
+
+
+def _planning_error_classification(exc: PlanningError) -> str:
+    if isinstance(exc.cause, (ValidationError, StructuredOutputContractError)):
+        return "structured_output_contract_failure"
+    return "technical_planning_failure"
 
 
 def save_report(report: dict[str, Any], output: Path) -> None:

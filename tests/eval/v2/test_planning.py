@@ -59,6 +59,15 @@ class FailingPlanner:
         raise AssertionError("TaskDraft validation must fail")
 
 
+class ProviderFailingPlanner:
+    def plan(self, question: str) -> PlanningResult:
+        raise PlanningError(
+            role="decomposer",
+            attempts=2,
+            cause=ConnectionError("provider connection failed"),
+        )
+
+
 def _write_jsonl(path: Path, records: list[dict[str, object]]) -> None:
     path.write_text("".join(json.dumps(record) + "\n" for record in records))
 
@@ -430,3 +439,44 @@ def test_planning_error_records_sanitized_pydantic_cause(tmp_path: Path) -> None
     }
     assert "planning-secret-must-not-appear" not in json.dumps(report)
     assert report["evaluation_incomplete"] is True
+    assert report["structural_violations"]["schema_invariant_violations"] == 1
+    assert report["structural_violations"]["structured_output_contract_failures"] == 1
+    assert report["structural_violations"]["technical_planning_failures"] == 0
+
+
+def test_planning_provider_error_is_incomplete_not_schema_violation(
+    tmp_path: Path,
+) -> None:
+    qa = tmp_path / "qa.jsonl"
+    annotations = tmp_path / "annotations.jsonl"
+    _write_jsonl(qa, [{"finqa_id": "sample", "question": "查询事实"}])
+    _write_jsonl(
+        annotations,
+        [
+            {
+                "finqa_id": "sample",
+                "complexity": "simple",
+                "capability": "retrieval_synthesis",
+                "required_information_units": [
+                    {"description": "事实", "expected_capability": None}
+                ],
+                "expected_outcome": "complete",
+            }
+        ],
+    )
+
+    report = evaluate_planning(
+        qa,
+        annotations,
+        config=V2Config(),
+        planner=ProviderFailingPlanner(),
+        run_id="planning-provider-error",
+    )
+
+    error = report["per_sample"][0]["errors"][0]
+    assert error["classification"] == "technical_planning_failure"
+    assert error["cause"]["exception_type"] == "ConnectionError"
+    assert report["evaluation_incomplete"] is True
+    assert report["structural_violations"]["schema_invariant_violations"] == 0
+    assert report["structural_violations"]["structured_output_contract_failures"] == 0
+    assert report["structural_violations"]["technical_planning_failures"] == 1
