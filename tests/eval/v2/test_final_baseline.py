@@ -753,6 +753,50 @@ def test_missing_answer_evaluator_is_unavailable_not_zero(tmp_path: Path) -> Non
     assert result["evaluation_incomplete"] is True
 
 
+def test_integrated_answer_ragas_failure_is_sanitized_and_blocks_eligibility(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    async def broken_answer_evaluator(**_kwargs: object) -> dict[str, object]:
+        raise RuntimeError("Authorization: Bearer answer-ragas-secret initialization failed")
+
+    monkeypatch.setattr(baseline, "_git_dirty", lambda: False)
+    monkeypatch.setattr(baseline, "_contract_prediction", _passing_scenario_prediction)
+    monkeypatch.setattr(baseline, "_real_prediction", _passing_scenario_prediction)
+    monkeypatch.setattr(
+        "eval.v2.answer_baseline.evaluate_v2_answers", broken_answer_evaluator
+    )
+    reports = _valid_evaluator_and_stage_reports(tmp_path)
+    reports["answer_ragas_report"] = None
+    result = evaluate_baseline(
+        output_root=tmp_path / "out",
+        run_id="answer-ragas-init-failure",
+        profile="full_baseline",
+        config=V2Config(),
+        retrieval_report=_valid_retrieval_report(tmp_path / "retrieval.json"),
+        **reports,
+    )
+
+    assert result["baseline_status"] == "not_eligible"
+    assert result["freeze_eligible"] is False
+    assert result["evaluation_incomplete"] is True
+    assert result["evaluation_completeness"]["answer_ragas_evaluator_evaluated"] is False
+    assert result["evaluator_failures"] == [
+        {
+            "evaluator": "answer_ragas",
+            "exception_type": "RuntimeError",
+            "summary": "Authorization=[REDACTED] initialization failed",
+            "validation_errors": [],
+        }
+    ]
+    serialized = json.dumps(result)
+    assert "answer-ragas-secret" not in serialized
+    assert "answer RAGAS report not provided" == next(
+        item["error"]
+        for item in result["evaluator_reports"]
+        if item["evaluator"] == "answer_ragas"
+    )
+
+
 def test_terminal_unresolved_tag_rejects_waiting_user(tmp_path: Path) -> None:
     records = [
         json.loads(line)

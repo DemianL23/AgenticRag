@@ -20,6 +20,8 @@ from agenticrag.v2.planning import PlanningError, PlanningService, _invoke_struc
 from agenticrag.v2.schemas import TaskDraft, V2Model
 from agenticrag.v2.types import Complexity, GlobalAnswerOutcome, TaskCapability
 
+from .diagnostics import safe_exception_diagnostic
+
 DEFAULT_QA_PATH = Path("qa.jsonl")
 DEFAULT_ANNOTATION_PATH = Path("eval/datasets/v2_qa_annotations.jsonl")
 DEFAULT_OUTPUT_ROOT = Path("artifacts/eval/v2/module2_planning")
@@ -297,7 +299,7 @@ def evaluate_planning(
         except PlanningError as exc:
             structural["schema_invariant_violations"] += 1
             evaluation_incomplete = True
-            item["errors"].append(exc.execution_error.model_dump(mode="json"))
+            item["errors"].append(_planning_error_diagnostic(exc))
             item["latency_seconds"]["planning_total"] = time.perf_counter() - sample_started
             per_sample.append(item)
             continue
@@ -424,7 +426,7 @@ def evaluate_planning(
                                 complex_capability_correct += 1
                 except PlanningError as exc:
                     evaluation_incomplete = True
-                    item["errors"].append(exc.execution_error.model_dump(mode="json"))
+                    item["errors"].append(_planning_error_diagnostic(exc))
                     item["latency_seconds"]["planning_judge"] = time.perf_counter() - judge_started
         item["latency_seconds"]["planning_total"] = time.perf_counter() - sample_started
         per_sample.append(item)
@@ -496,6 +498,15 @@ def evaluate_planning(
         "elapsed_seconds": time.perf_counter() - started,
     }
     return report
+
+
+def _planning_error_diagnostic(exc: PlanningError) -> dict[str, Any]:
+    """Retain bounded PlanningError cause data without model inputs/payloads."""
+
+    return {
+        **exc.execution_error.model_dump(mode="json"),
+        "cause": safe_exception_diagnostic(exc.cause),
+    }
 
 
 def save_report(report: dict[str, Any], output: Path) -> None:

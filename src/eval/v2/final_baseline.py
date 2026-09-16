@@ -37,6 +37,7 @@ from agenticrag.v2.types import (
 )
 from .audit import AuditCounts, audit_v2_result
 from .contract_harness import run_contract_scenario
+from .diagnostics import safe_exception_diagnostic
 from .module8 import CrossProcessEvidence, CrossProcessInvocation
 from .planning import load_planning_samples
 from eval.retrieval_runner import load_retrieval_dataset
@@ -212,6 +213,15 @@ class EvaluatorReportReference(V2Model):
     error: str | None = None
 
 
+class EvaluatorFailureDiagnostic(V2Model):
+    """Safe record of an integrated evaluator startup/execution failure."""
+
+    evaluator: Literal["planning", "module4_grade_route", "answer_ragas"]
+    exception_type: str = Field(min_length=1)
+    summary: str = Field(min_length=1)
+    validation_errors: list[dict[str, Any]] = Field(default_factory=list)
+
+
 class ExternalReportEnvelope(BaseModel):
     """Minimum common contract for immutable evaluator artifacts."""
 
@@ -286,6 +296,7 @@ class BaselineCandidateReport(V2Model):
     predictions_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     artifact_digest: str = Field(default="0" * 64, pattern=r"^[0-9a-f]{64}$")
     errors: list[dict[str, Any]] = Field(default_factory=list)
+    evaluator_failures: list[EvaluatorFailureDiagnostic] = Field(default_factory=list)
     digests: dict[str, str] = Field(default_factory=dict)
 
     @model_validator(mode="after")
@@ -476,7 +487,7 @@ def evaluate_baseline(
     predictions_path = report_dir / "predictions.jsonl"
     predictions_path.write_text("".join(json.dumps(item, ensure_ascii=False, sort_keys=True) + "\n" for item in predictions), encoding="utf-8")
     if profile == "full_baseline":
-        planning_report, module4_gold_report, answer_ragas_report = (
+        planning_report, module4_gold_report, answer_ragas_report, evaluator_failures = (
             _run_integrated_evaluators(
                 report_dir=report_dir,
                 config=config,
@@ -485,6 +496,8 @@ def evaluate_baseline(
                 answer_ragas_report=answer_ragas_report,
             )
         )
+    else:
+        evaluator_failures = []
     evaluated_commit = _git_commit()
     stage_refs = [
         _load_stage_report(stage_v21_report, "v2_1", config, evaluated_commit),
@@ -517,6 +530,7 @@ def evaluate_baseline(
         evaluator_metrics=evaluator_metrics,
         retrieval_report=retrieval_report,
         cross_process_report=cross_process_report,
+        evaluator_failures=evaluator_failures,
     )
     report_path = report_dir / "report.json"
     report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -533,10 +547,16 @@ def _run_integrated_evaluators(
     planning_report: Path | None,
     module4_gold_report: Path | None,
     answer_ragas_report: Path | None,
-) -> tuple[Path | None, Path | None, Path | None]:
+) -> tuple[
+    Path | None,
+    Path | None,
+    Path | None,
+    list[EvaluatorFailureDiagnostic],
+]:
     """Run required evaluators when a full baseline did not provide artifacts."""
 
     integrated = report_dir / "integrated_evaluators"
+    failures: list[EvaluatorFailureDiagnostic] = []
     if planning_report is None:
         from .planning import PlanningCoverageJudge, evaluate_planning
 
@@ -551,7 +571,8 @@ def _run_integrated_evaluators(
             _write_integrated_report(
                 planning_report, payload, producer="module2_planning_evaluator"
             )
-        except Exception:
+        except Exception as exc:
+            failures.append(_evaluator_failure("planning", exc))
             planning_report = None
     if module4_gold_report is None:
         from .module4_gold import replay_module4_gold
@@ -568,7 +589,8 @@ def _run_integrated_evaluators(
                 {**payload, "resolved_config": config.resolved_record()},
                 producer="module4_gold_replay_evaluator",
             )
-        except Exception:
+        except Exception as exc:
+            failures.append(_evaluator_failure("module4_grade_route", exc))
             module4_gold_report = None
     if answer_ragas_report is None:
         from .answer_baseline import evaluate_v2_answers, write_answer_report
@@ -583,9 +605,22 @@ def _run_integrated_evaluators(
             )
             answer_ragas_report = integrated / "answer_ragas.json"
             write_answer_report(payload, answer_ragas_report)
-        except Exception:
+        except Exception as exc:
+            failures.append(_evaluator_failure("answer_ragas", exc))
             answer_ragas_report = None
-    return planning_report, module4_gold_report, answer_ragas_report
+    return planning_report, module4_gold_report, answer_ragas_report, failures
+
+
+def _evaluator_failure(
+    evaluator: Literal["planning", "module4_grade_route", "answer_ragas"],
+    exc: Exception,
+) -> EvaluatorFailureDiagnostic:
+    """Capture a sanitised integrated-evaluator failure in the candidate report."""
+
+    return EvaluatorFailureDiagnostic(
+        evaluator=evaluator,
+        **safe_exception_diagnostic(exc),
+    )
 
 
 def _write_integrated_report(
@@ -789,6 +824,7 @@ def _build_report(
     evaluator_metrics: dict[str, Any],
     retrieval_report: Path,
     cross_process_report: Path | None,
+    evaluator_failures: list[EvaluatorFailureDiagnostic],
 ) -> dict[str, Any]:
     dataset_records = _all_dataset_records(dataset_path)
     scenario_by_id = {record.scenario_id: record for record in selected}
@@ -971,6 +1007,7 @@ def _build_report(
         hard_gate_results=[HardGateResult(name=name, passed=gate_values[name], evaluated=evaluated, reason=_gate_reason(name, gate_values[name], v1, cross)) for name, (_value, evaluated) in gate_checks.items()],
         hard_gates=gate_values, failed_gates=failed_gates, baseline_status="eligible" if freeze_eligible else "not_eligible", freeze_eligible=freeze_eligible, evaluation_incomplete=evaluation_incomplete, incompleteness_reasons=incomplete_reasons,
         predictions_sha256=_sha256(predictions_path), errors=[item["error"] for item in predictions if item.get("error")],
+        evaluator_failures=evaluator_failures,
         digests={"dataset_sha256": _sha256(dataset_path), "workflow_scenarios_sha256": _sha256(dataset_path), "resolved_config_sha256": _json_digest(config.resolved_record()), "predictions_sha256": _sha256(predictions_path), "retrieval_eval_v2_sha256": _digest_if_exists(RETRIEVAL_DATASET), "qa_sha256": _digest_if_exists(QA_DATASET), "v2_qa_annotations_sha256": _digest_if_exists(ANNOTATION_DATASET), "module4_gold_sha256": _digest_if_exists(MODULE4_GOLD_DATASET), "artifact_manifest_sha256": _json_digest({"dataset_sha256": _sha256(dataset_path), "resolved_config_sha256": _json_digest(config.resolved_record()), "predictions_sha256": _sha256(predictions_path)})},
     )
     return report.model_copy(update={"artifact_digest": _report_digest(report)}).model_dump(mode="json")
@@ -1807,7 +1844,11 @@ def _digest_if_exists(path: Path) -> str:
 
 
 def _safe_error(exc: Exception) -> dict[str, str]:
-    return {"exception_type": type(exc).__name__, "message": str(exc).replace("\n", " ")[:1500]}
+    diagnostic = safe_exception_diagnostic(exc)
+    return {
+        "exception_type": diagnostic["exception_type"],
+        "message": diagnostic["summary"],
+    }
 
 
 def _git_commit() -> str | None:

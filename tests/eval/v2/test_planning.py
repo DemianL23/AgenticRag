@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from agenticrag.v2.config import DecisionModelConfig, V2Config
-from agenticrag.v2.planning import PlanningResult
+from agenticrag.v2.planning import PlanningError, PlanningResult
 from agenticrag.v2.schemas import ComplexityDecision, DecompositionResult, TaskDraft
 from eval.v2.planning import (
     CoverageJudgeResult,
@@ -41,6 +41,22 @@ class FakePlanner:
 
     def plan(self, question: str) -> PlanningResult:
         return self.result
+
+
+class FailingPlanner:
+    def plan(self, question: str) -> PlanningResult:
+        try:
+            TaskDraft.model_validate(
+                {
+                    "query": "",
+                    "intent": "retrieve the requested fact",
+                    "capability": "retrieval_synthesis",
+                    "api_key": "planning-secret-must-not-appear",
+                }
+            )
+        except Exception as cause:
+            raise PlanningError(role="decomposer", attempts=2, cause=cause) from cause
+        raise AssertionError("TaskDraft validation must fail")
 
 
 def _write_jsonl(path: Path, records: list[dict[str, object]]) -> None:
@@ -374,3 +390,43 @@ def test_router_mismatch_is_quality_error_not_structural_violation(tmp_path: Pat
     assert report["metrics"]["macro_decomposer_requirement_coverage_on_correct_route"] is None
     assert report["metrics"]["micro_decomposer_requirement_coverage_on_correct_route"] is None
     assert report["metrics"]["unmatched_gold_units_count"] == 2
+
+
+def test_planning_error_records_sanitized_pydantic_cause(tmp_path: Path) -> None:
+    qa = tmp_path / "qa.jsonl"
+    annotations = tmp_path / "annotations.jsonl"
+    _write_jsonl(qa, [{"finqa_id": "sample", "question": "查询事实"}])
+    _write_jsonl(
+        annotations,
+        [
+            {
+                "finqa_id": "sample",
+                "complexity": "simple",
+                "capability": "retrieval_synthesis",
+                "required_information_units": [
+                    {"description": "事实", "expected_capability": None}
+                ],
+                "expected_outcome": "complete",
+            }
+        ],
+    )
+
+    report = evaluate_planning(
+        qa,
+        annotations,
+        config=V2Config(),
+        planner=FailingPlanner(),
+        run_id="planning-error-cause",
+    )
+
+    error = report["per_sample"][0]["errors"][0]
+    assert error["code"] == "structured_output_invalid"
+    assert error["details"] == {"role": "decomposer", "attempts": "2"}
+    assert error["cause"]["exception_type"] == "ValidationError"
+    assert error["cause"]["summary"] == "Pydantic validation failed"
+    assert {tuple(item["loc"]): item["type"] for item in error["cause"]["validation_errors"]} == {
+        ("query",): "string_too_short",
+        ("api_key",): "extra_forbidden",
+    }
+    assert "planning-secret-must-not-appear" not in json.dumps(report)
+    assert report["evaluation_incomplete"] is True
